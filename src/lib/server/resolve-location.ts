@@ -10,6 +10,8 @@ export type PlaceDetails = {
   district: string | null;
   state: string | null;
   pinCode: string | null;
+  phone?: string | null;
+  hours?: { mode: "24h" } | { mode: "set"; opening: string; closing: string } | null;
 };
 
 export type ResolvedLocation =
@@ -197,5 +199,106 @@ export async function describeLocation(coordinates: Coordinates, link: string | 
     };
   } catch {
     return undefined;
+  }
+}
+
+export type PlaceSuggestion = { placeId: string; name: string; area: string };
+
+const placesKey = () => process.env.GOOGLE_PLACES_API_KEY ?? process.env.GOOGLE_MAPS_API_KEY;
+const PLACES_BASE = "https://maps.googleapis.com/maps/api/place";
+
+/** Google's matches as someone types their library's name. */
+export async function suggestPlaces(query: string, sessionToken: string): Promise<PlaceSuggestion[] | null> {
+  const key = placesKey();
+  if (!key) return null;
+  try {
+    const response = await fetch(`${PLACES_BASE}/autocomplete/json?input=${encodeURIComponent(query)}&components=country:in&language=en&sessiontoken=${sessionToken}&key=${key}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!response.ok) return null;
+    const json = (await response.json()) as {
+      status: string;
+      predictions?: Array<{ place_id: string; description: string; structured_formatting?: { main_text?: string; secondary_text?: string } }>;
+    };
+    if (json.status !== "OK" && json.status !== "ZERO_RESULTS") return null;
+    return (json.predictions ?? []).slice(0, 5).map((item) => ({
+      placeId: item.place_id,
+      name: item.structured_formatting?.main_text ?? item.description,
+      area: (item.structured_formatting?.secondary_text ?? "").replace(/,\s*India$/, ""),
+    }));
+  } catch {
+    return null;
+  }
+}
+
+type Period = { open?: { day: number; time: string }; close?: { day: number; time: string } };
+
+/** Only a simple weekly pattern is filled in; anything irregular is left for the person to enter. */
+function hoursFromPeriods(periods: Period[] | undefined): PlaceDetails["hours"] {
+  if (!periods?.length) return null;
+  if (periods.length === 1 && periods[0].open?.time === "0000" && !periods[0].close) return { mode: "24h" };
+  if (periods.length < 6 || periods.some((period) => !period.open || !period.close)) return null;
+  const open = periods[0].open!.time;
+  const close = periods[0].close!.time;
+  if (periods.some((period) => period.open!.time !== open || period.close!.time !== close)) return null;
+  const clock = (value: string) => `${value.slice(0, 2)}:${value.slice(2)}`;
+  return { mode: "set", opening: clock(open), closing: clock(close) };
+}
+
+/** Everything a picked Google place can fill in. */
+export async function resolvePlaceId(placeId: string, sessionToken: string): Promise<ResolvedLocation> {
+  const key = placesKey();
+  if (!key) return { ok: false, reason: "unreachable" };
+  try {
+    const fields = "name,geometry,formatted_address,address_components,formatted_phone_number,opening_hours";
+    const response = await fetch(`${PLACES_BASE}/details/json?place_id=${encodeURIComponent(placeId)}&fields=${fields}&language=en&sessiontoken=${sessionToken}&key=${key}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!response.ok) return { ok: false, reason: "unreachable" };
+    const json = (await response.json()) as {
+      status: string;
+      result?: {
+        name?: string;
+        formatted_address?: string;
+        formatted_phone_number?: string;
+        geometry?: { location?: { lat: number; lng: number } };
+        address_components?: Array<{ long_name: string; types: string[] }>;
+        opening_hours?: { periods?: Period[] };
+      };
+    };
+    const place = json.result;
+    const location = place?.geometry?.location;
+    if (json.status !== "OK" || !place || !location) return { ok: false, reason: "not_found" };
+    const part = (...types: string[]) => {
+      for (const type of types) {
+        const found = place.address_components?.find((component) => component.types.includes(type));
+        if (found) return found.long_name;
+      }
+      return null;
+    };
+    return {
+      ok: true,
+      latitude: location.lat,
+      longitude: location.lng,
+      mapLink: `https://www.google.com/maps/search/?api=1&query=${location.lat},${location.lng}&query_place_id=${encodeURIComponent(placeId)}`,
+      label: place.name ?? null,
+      approximate: false,
+      details: {
+        name: place.name ?? null,
+        // Google puts a plus code in addresses that have no street number.
+        address: place.formatted_address?.replace(/,\s*India$/, "").replace(/\b[A-Z0-9]{4,8}\+[A-Z0-9]{2,3},?\s*/, "") ?? null,
+        locality: part("sublocality_level_1", "sublocality", "neighborhood"),
+        city: part("locality"),
+        district: part("administrative_area_level_3"),
+        state: part("administrative_area_level_1"),
+        pinCode: part("postal_code"),
+        phone: place.formatted_phone_number ?? null,
+        hours: hoursFromPeriods(place.opening_hours?.periods),
+      },
+    };
+  } catch {
+    return { ok: false, reason: "unreachable" };
   }
 }

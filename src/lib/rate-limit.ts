@@ -146,6 +146,8 @@ export const RATE_LIMITS = {
   submitReview: { id: "submit-review", maxRequests: 3, windowMs: 60_000 },
   submitReviewDaily: { id: "submit-review-day", maxRequests: 10, windowMs: 86_400_000 },
   resolveLocation: { id: "resolve-location", maxRequests: 30, windowMs: 60_000 },
+  placeSearch: { id: "place-search", maxRequests: 90, windowMs: 60_000 },
+  placeSearchDaily: { id: "place-search-day", maxRequests: 500, windowMs: 86_400_000 },
   studySessionStart: { id: "study-start", maxRequests: 30, windowMs: 3_600_000 },
   studySessionFinish: { id: "study-finish", maxRequests: 30, windowMs: 3_600_000 },
 } as const;

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { rateLimit, RATE_LIMITS } from "@/lib/rate-limit";
-import { describeLocation, resolveLocationInput } from "@/lib/server/resolve-location";
+import { describeLocation, resolveLocationInput, resolvePlaceId } from "@/lib/server/resolve-location";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +16,13 @@ export async function POST(request: Request) {
   const limit = await rateLimit(user.id, RATE_LIMITS.resolveLocation);
   if (!limit.success) return NextResponse.json({ ok: false, reason: "rate_limited" }, { status: 429 });
 
-  const body = (await request.json().catch(() => null)) as { input?: unknown } | null;
+  const body = (await request.json().catch(() => null)) as { input?: unknown; placeId?: unknown; sessionToken?: unknown } | null;
+  if (typeof body?.placeId === "string") {
+    const validId = /^[A-Za-z0-9_-]{10,500}$/.test(body.placeId);
+    const validToken = typeof body.sessionToken === "string" && /^[A-Za-z0-9-]{8,64}$/.test(body.sessionToken);
+    if (!validId || !validToken) return NextResponse.json({ ok: false, reason: "not_found" });
+    return NextResponse.json(await resolvePlaceId(body.placeId, body.sessionToken as string));
+  }
   const input = typeof body?.input === "string" ? body.input.slice(0, 4000) : "";
   const result = await resolveLocationInput(input);
   if (!result.ok) return NextResponse.json(result);
