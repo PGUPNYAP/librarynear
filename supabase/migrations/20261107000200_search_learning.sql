@@ -37,6 +37,17 @@ BEGIN
   END IF;
 END $$;
 
+-- Earlier seed scripts inserted the same aliases several times; keep the oldest.
+DELETE FROM public.place_aliases AS alias
+USING (
+  SELECT id, row_number() OVER (
+    PARTITION BY COALESCE(city, ''), lower(alias_text), COALESCE(target_type, place_type), lower(canonical_name)
+    ORDER BY created_at NULLS LAST, id
+  ) AS position
+  FROM public.place_aliases
+) AS ranked
+WHERE alias.id = ranked.id AND ranked.position > 1;
+
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_place_aliases_city_alias_target
   ON public.place_aliases (COALESCE(city, ''), lower(alias_text), COALESCE(target_type, place_type), lower(canonical_name));
 
