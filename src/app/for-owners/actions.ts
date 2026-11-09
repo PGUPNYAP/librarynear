@@ -1,13 +1,18 @@
 "use server";
 
-import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { upsertProfileFromUser } from "@/lib/auth/profile";
+import { buildLibraryFeePlanInsertRows } from "@/lib/library-plans";
 import {
-  buildLibraryFeePlanInsertRows,
-  parsePlanDraftsJson,
-} from "@/lib/library-plans";
+  cleanLibraryForm,
+  emptyLibraryFormValues,
+  planRowsToDrafts,
+  validateLibraryForm,
+  type FieldErrors,
+  type LibraryFormValues,
+  type PlanRow,
+} from "@/lib/library-form";
 import { refreshLibraryProfileCompletenessScore } from "@/lib/library-profile-score-server";
 import { findNearestMetro } from "@/lib/nearest-metro";
 import {
@@ -15,25 +20,14 @@ import {
   revalidateLibraryContent,
 } from "@/lib/revalidate-library-content";
 import { supabaseServer } from "@/lib/supabase-server";
-import {
-  hasValidPlanDescriptions,
-  hasValidTimeRange,
-  isValidLatitude,
-  isValidLongitude,
-  isValidPinCode,
-  normalizeIndianMobile,
-  normalizeIndianPhone,
-} from "@/lib/owner-form-validation";
+import { isValidLatitude, isValidLongitude } from "@/lib/owner-form-validation";
 import { logLibraryActivity } from "@/lib/library-activity";
-import { resolveGoogleMapsCoordinates } from "@/lib/server/google-maps-resolver";
+import { resolveLocationInput } from "@/lib/server/resolve-location";
+import { canonicalMapLink } from "@/lib/maps-coordinates";
 import { cleanupImageKitFiles, isOwnerSubmissionImageUrl } from "@/lib/server/imagekit";
 import { getClientIp, rateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 
 const MAX_OWNER_PHOTOS = 3;
-
-function ownerErrorRedirect(code: string): never {
-  redirect(`/for-owners?error=${code}`);
-}
 
 type EditableOwnerSubmissionStatus = "needs_changes" | "rejected";
 
@@ -61,24 +55,6 @@ type ExistingOwnerSubmission = {
   amenities_text: string | null;
 };
 
-function getTrimmedString(formData: FormData, key: string) {
-  return String(formData.get(key) ?? "").trim();
-}
-
-const OWNER_CLEARABLE = new Set(["district", "description", "whatsapp_number"]);
-
-/**
- * New submission: the typed value (empty = nothing).
- * Editing a returned submission: the form shows old values as placeholders,
- * so empty keeps the old value unless clear_<field> is ticked.
- */
-function readOwnerField(formData: FormData, key: string, existing: string | number | null | undefined, editing: boolean) {
-  if (OWNER_CLEARABLE.has(key) && formData.get(`clear_${key}`) === "on") return "";
-  const submitted = getTrimmedString(formData, key);
-  if (submitted || !editing) return submitted;
-  return existing === null || existing === undefined ? "" : String(existing);
-}
-
 /** An existing listing that looks like the same library (same phone, or same name in the same locality). */
 async function findPossibleDuplicate(phone: string | null, displayName: string, locality: string, city: string) {
   if (phone) {
@@ -105,27 +81,6 @@ async function findPossibleDuplicate(phone: string | null, displayName: string, 
   return (data?.id as string | undefined) ?? null;
 }
 
-function getExistingImageUrls(formData: FormData) {
-  return formData
-    .getAll("existing_image_urls")
-    .map((value) => String(value).trim())
-    .filter(Boolean);
-}
-
-function getUploadedImageUrls(formData: FormData) {
-  return formData
-    .getAll("uploaded_image_urls")
-    .map((value) => String(value).trim())
-    .filter(Boolean);
-}
-
-function getUploadedImageFileIds(formData: FormData) {
-  return formData
-    .getAll("uploaded_image_file_ids")
-    .map((value) => String(value).trim())
-    .filter(Boolean);
-}
-
 function isEditableOwnerSubmissionStatus(status: string): status is EditableOwnerSubmissionStatus {
   return status === "needs_changes" || status === "rejected";
 }
@@ -147,12 +102,21 @@ async function loadExistingOwnerSubmission(userId: string) {
   return (data as ExistingOwnerSubmission | null) ?? null;
 }
 
-export async function submitOwnerLibrary(formData: FormData) {
+export type OwnerSubmitResult =
+  | { ok: true }
+  | { ok: false; error: string; fieldErrors?: FieldErrors; photoError?: string };
+
+const CHECK_FIELDS = "Please fix the highlighted fields.";
+
+export async function submitOwnerLibrary(
+  values: LibraryFormValues,
+  photos: { existing: string[]; uploaded: Array<{ url: string; fileId: string }> },
+): Promise<OwnerSubmitResult> {
   const hdrs = await headers();
   const ip = getClientIp(hdrs);
   const rateCheck = await rateLimit(ip, RATE_LIMITS.submitOwnerLibrary);
   if (!rateCheck.success) {
-    redirect("/for-owners?error=rate_limited");
+    return { ok: false, error: "Too many attempts. Wait a minute and try again. Your details are safe here." };
   }
 
   const supabase = await createClient();
@@ -161,188 +125,84 @@ export async function submitOwnerLibrary(formData: FormData) {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    redirect("/for-owners");
+    return { ok: false, error: "Your sign-in has expired. Refresh and sign in again. Your details are saved on this device." };
   }
 
   await upsertProfileFromUser(user);
 
   const existingSubmission = await loadExistingOwnerSubmission(user.id);
-  if (
-    existingSubmission &&
-    !isEditableOwnerSubmissionStatus(existingSubmission.status)
-  ) {
-    ownerErrorRedirect("duplicate_submission");
+  if (existingSubmission && !isEditableOwnerSubmissionStatus(existingSubmission.status)) {
+    return { ok: false, error: "You already have a library under review. You can edit its plans on this page." };
   }
 
-  const editing = Boolean(existingSubmission);
-  const field = (key: keyof ExistingOwnerSubmission) =>
-    readOwnerField(formData, key, existingSubmission?.[key] as string | number | null | undefined, editing);
+  const uploadedFileIds = photos.uploaded.map((photo) => photo.fileId);
 
-  const displayName = field("display_name");
-  const locality = field("locality");
-  const city = field("city");
-  const district = field("district") || null;
-  const state = field("state");
-  const pinCode = field("pin_code");
-  const fullAddress = field("full_address");
-  const open24h = formData.get("open_24h") === "on";
-  const openingTime = open24h ? "00:00" : field("opening_time");
-  const closingTime = open24h ? "00:00" : field("closing_time");
-  const rawMapLink = field("map_link");
-  const description = field("description") || null;
-  const totalSeatsRaw = field("total_seats");
-  const totalSeats = totalSeatsRaw ? Number.parseInt(totalSeatsRaw, 10) : Number.NaN;
-  const rawPhone = field("phone_number");
-  const rawWhatsapp = field("whatsapp_number");
-  const normalizedPhone = normalizeIndianPhone(rawPhone);
-  // WhatsApp only works on mobiles.
-  const normalizedWhatsapp = rawWhatsapp ? normalizeIndianMobile(rawWhatsapp) : null;
-  const rawPlansJson = String(formData.get("fee_plans_json") ?? "");
-  const feePlans = parsePlanDraftsJson(rawPlansJson);
-  const amenityValuesRaw = formData
-    .getAll("amenities")
-    .map((value) => String(value).trim())
-    .filter(Boolean);
-  const amenityValues = amenityValuesRaw.length > 0
-    ? amenityValuesRaw
-    : String(existingSubmission?.amenities_text ?? "")
-        .split(/[,|\n]/)
-        .map((value) => value.trim())
-        .filter(Boolean);
-  const amenitiesText = amenityValues.length > 0 ? amenityValues.join(", ") : null;
-  const existingImageUrls = existingSubmission ? getExistingImageUrls(formData) : [];
-  const uploadedImageUrls = getUploadedImageUrls(formData);
-  const uploadedImageFileIds = getUploadedImageFileIds(formData);
-  const photoUploadState = getTrimmedString(formData, "photo_upload_state");
-
-  if (
-    !displayName ||
-    !locality ||
-    !city ||
-    !state ||
-    !pinCode ||
-    !fullAddress ||
-    !openingTime ||
-    !closingTime ||
-    !rawMapLink ||
-    !rawPhone ||
-    !Number.isInteger(totalSeats) ||
-    totalSeats < 1 ||
-    totalSeats > 100000 ||
-    amenityValues.length === 0
-  ) {
-    ownerErrorRedirect("missing_required_fields");
+  const fieldErrors = validateLibraryForm(values, { mode: "owner" });
+  if (Object.keys(fieldErrors).length > 0) {
+    return ({ ok: false, error: CHECK_FIELDS, fieldErrors });
   }
 
-  if (
-    displayName.length > 200 ||
-    locality.length > 120 ||
-    city.length > 120 ||
-    (district?.length ?? 0) > 120 ||
-    state.length > 120 ||
-    fullAddress.length > 500 ||
-    rawMapLink.length > 2000 ||
-    (description?.length ?? 0) > 2000 ||
-    amenityValues.length > 30 ||
-    amenityValues.some((value) => value.length > 80)
-  ) {
-    ownerErrorRedirect("missing_required_fields");
+  const totalPhotos = photos.existing.length + photos.uploaded.length;
+  if (totalPhotos === 0) return ({ ok: false, error: CHECK_FIELDS, photoError: "Add at least 1 photo of your library." });
+  if (totalPhotos > MAX_OWNER_PHOTOS) return ({ ok: false, error: CHECK_FIELDS, photoError: `Add at most ${MAX_OWNER_PHOTOS} photos.` });
+
+  const clean = cleanLibraryForm(values);
+
+  let latitude = clean.latitude;
+  let longitude = clean.longitude;
+  let mapLink = clean.map_link;
+  if (latitude === null || longitude === null) {
+    const resolved = await resolveLocationInput(clean.map_link);
+    if (!resolved.ok) {
+      return { ok: false, error: CHECK_FIELDS, fieldErrors: { map_link: "We couldn't read a location from this. Paste a Google Maps link, or tap I'm at the library now." } };
+    }
+    latitude = resolved.latitude;
+    longitude = resolved.longitude;
+    mapLink = resolved.mapLink;
+  } else {
+    mapLink = canonicalMapLink(clean.map_link, { latitude, longitude });
+  }
+  if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) {
+    return { ok: false, error: CHECK_FIELDS, fieldErrors: { latitude: "This location doesn't look right. Check the numbers." } };
   }
 
-  if (!normalizedPhone || (rawWhatsapp && !normalizedWhatsapp)) {
-    ownerErrorRedirect("invalid_phone");
-  }
-
-  if (!isValidPinCode(pinCode)) {
-    ownerErrorRedirect("invalid_pin_code");
-  }
-
-  if (!hasValidTimeRange(openingTime, closingTime)) {
-    ownerErrorRedirect("invalid_timings");
-  }
-
-  if (!hasValidPlanDescriptions(rawPlansJson)) {
-    ownerErrorRedirect("invalid_plan_description");
-  }
-
-  if (photoUploadState !== "ready") {
-    ownerErrorRedirect("image_upload_failed");
-  }
-
-  if (uploadedImageUrls.length !== uploadedImageFileIds.length) {
-    await cleanupImageKitFiles(uploadedImageFileIds);
-    ownerErrorRedirect("image_upload_failed");
-  }
-
-  if (uploadedImageUrls.length + existingImageUrls.length === 0) {
-    ownerErrorRedirect("too_few_images");
-  }
-
-  if (uploadedImageUrls.length + existingImageUrls.length > MAX_OWNER_PHOTOS) {
-    ownerErrorRedirect("too_many_images");
-  }
-
-  const resolvedMap = await resolveGoogleMapsCoordinates(rawMapLink);
-  if (resolvedMap.resolutionError === "invalid_map_link") {
-    ownerErrorRedirect("invalid_map_link");
-  }
-  if (resolvedMap.resolutionError === "unresolvable_map_link") {
-    ownerErrorRedirect("unresolvable_map_link");
-  }
-
-  const latitude = formData.get("latitude")
-    ? Number(formData.get("latitude"))
-    : resolvedMap.coordinates?.latitude ?? existingSubmission?.latitude ?? null;
-  const longitude = formData.get("longitude")
-    ? Number(formData.get("longitude"))
-    : resolvedMap.coordinates?.longitude ?? existingSubmission?.longitude ?? null;
-
-  if (
-    typeof latitude !== "number" ||
-    typeof longitude !== "number" ||
-    !isValidLatitude(latitude) ||
-    !isValidLongitude(longitude)
-  ) {
-    ownerErrorRedirect("invalid_coordinates");
+  const imageUrls = [...photos.existing, ...photos.uploaded.map((photo) => photo.url)];
+  if (!imageUrls.every((url) => isOwnerSubmissionImageUrl(url, user.id))) {
+    await cleanupImageKitFiles(uploadedFileIds);
+    return { ok: false, error: CHECK_FIELDS, photoError: "One of the photos couldn't be verified. Remove it and upload it again." };
   }
 
   const nearestMetro = await findNearestMetro(latitude, longitude);
-  const imageUrls = [...existingImageUrls, ...uploadedImageUrls];
-
-  if (!imageUrls.every((url) => isOwnerSubmissionImageUrl(url, user.id))) {
-    await cleanupImageKitFiles(uploadedImageFileIds);
-    ownerErrorRedirect("invalid_image");
-  }
 
   // Flag (don't block) submissions that look like one of our existing listings,
   // so an admin can check ownership before approving.
-  const possibleDuplicateOf = await findPossibleDuplicate(normalizedPhone, displayName, locality, city);
+  const possibleDuplicateOf = await findPossibleDuplicate(clean.phone_number, clean.display_name, clean.locality, clean.city);
 
   const payload = {
     user_id: user.id,
     ownership_status: "unverified",
     possible_duplicate_of: possibleDuplicateOf,
-    display_name: displayName,
-    city,
-    locality,
-    district,
-    state,
-    pin_code: pinCode,
-    full_address: fullAddress,
+    display_name: clean.display_name,
+    city: clean.city,
+    locality: clean.locality,
+    district: clean.district,
+    state: clean.state,
+    pin_code: clean.pin_code,
+    full_address: clean.full_address,
     nearest_metro: nearestMetro?.nearest_metro ?? null,
     nearest_metro_distance_km: nearestMetro?.nearest_metro_distance_km ?? null,
     latitude,
     longitude,
-    phone_number: normalizedPhone,
-    whatsapp_number: normalizedWhatsapp,
-    opening_time: openingTime,
-    closing_time: closingTime,
-    total_seats: totalSeats,
-    map_link: resolvedMap.resolvedUrl,
-    description,
-    amenities_text: amenitiesText,
+    phone_number: clean.phone_number,
+    whatsapp_number: clean.whatsapp_number,
+    opening_time: clean.opening_time,
+    closing_time: clean.closing_time,
+    total_seats: clean.total_seats,
+    map_link: mapLink,
+    description: clean.description,
+    amenities_text: clean.amenities_text,
     image_urls: imageUrls,
-    fee_plans: feePlans.length > 0 ? feePlans : null,
+    fee_plans: clean.plans.length > 0 ? clean.plans : null,
     status: "pending_review",
     reviewer_notes: null,
     reviewed_at: null,
@@ -368,23 +228,27 @@ export async function submitOwnerLibrary(formData: FormData) {
 
   if (error) {
     console.error("Failed to create owner submission:", error.message);
-    await cleanupImageKitFiles(uploadedImageFileIds);
-    ownerErrorRedirect("submission_failed");
+    // Photos stay uploaded so a retry doesn't need them again; the nightly cleanup removes abandoned ones.
+    return { ok: false, error: "We couldn't submit your listing, and nothing was saved. Try again in a moment." };
   }
 
   // These photos are now part of a submission; stop tracking them for cleanup.
-  if (uploadedImageFileIds.length > 0) {
-    await supabaseServer.from("pending_uploads" as never).delete().in("file_id" as never, uploadedImageFileIds as never);
+  if (uploadedFileIds.length > 0) {
+    await supabaseServer.from("pending_uploads" as never).delete().in("file_id" as never, uploadedFileIds as never);
   }
 
-  redirect("/for-owners?submitted=1");
+  return { ok: true };
 }
 
-export async function updateOwnerSubmissionPlans(formData: FormData) {
+export async function updateOwnerSubmissionPlans(
+  submissionId: string,
+  rows: PlanRow[],
+  confirmRemoveAll: boolean,
+): Promise<{ ok: true } | { ok: false; error: string }> {
   const ip = getClientIp(await headers());
   const rateCheck = await rateLimit(ip, RATE_LIMITS.ownerPlansUpdate);
   if (!rateCheck.success) {
-    redirect("/for-owners?plans_error=1");
+    return { ok: false, error: "Too many saves. Wait a minute and try again." };
   }
 
   const supabase = await createClient();
@@ -393,21 +257,20 @@ export async function updateOwnerSubmissionPlans(formData: FormData) {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    redirect("/for-owners");
+    return { ok: false, error: "Your sign-in has expired. Refresh and sign in again." };
   }
 
-  const submissionId = String(formData.get("submission_id") ?? "").trim();
-  const rawPlansJson = String(formData.get("fee_plans_json") ?? "");
-  const feePlans = parsePlanDraftsJson(rawPlansJson);
-
-  if (!submissionId || !hasValidPlanDescriptions(rawPlansJson)) {
-    redirect("/for-owners?plans_error=1");
+  const check = validateLibraryForm({ ...emptyLibraryFormValues(), plans: rows }, { mode: "staff" });
+  const planProblem = Object.entries(check).find(([key]) => key.startsWith("plans"));
+  if (!submissionId || planProblem) {
+    return { ok: false, error: planProblem ? planProblem[1] : "We couldn't find this listing." };
   }
 
-  // An empty or broken payload must not silently delete every plan.
-  const confirmRemoveAll = formData.get("confirm_remove_all_plans") === "on";
+  const feePlans = planRowsToDrafts(rows);
+
+  // An empty payload must not silently delete every plan.
   if (feePlans.length === 0 && !confirmRemoveAll) {
-    redirect("/for-owners?plans_error=empty");
+    return { ok: false, error: "No plans to save, so we kept your current ones." };
   }
 
   const { data: submission, error: submissionError } = await supabaseServer
@@ -417,7 +280,7 @@ export async function updateOwnerSubmissionPlans(formData: FormData) {
     .maybeSingle();
 
   if (submissionError || !submission || submission.user_id !== user.id) {
-    redirect("/for-owners?plans_error=1");
+    return { ok: false, error: "We couldn't find this listing on your account." };
   }
 
   const { error } = await supabaseServer
@@ -429,7 +292,7 @@ export async function updateOwnerSubmissionPlans(formData: FormData) {
     .eq("id", submissionId);
 
   if (error) {
-    redirect("/for-owners?plans_error=1");
+    return { ok: false, error: "We couldn't save your plans. Try again in a moment." };
   }
 
   if (submission.submitted_library_branch_id) {
@@ -445,7 +308,7 @@ export async function updateOwnerSubmissionPlans(formData: FormData) {
     );
     if (replacePlansError) {
       console.error("Failed to replace library fee plans:", replacePlansError.message);
-      redirect("/for-owners?plans_error=1");
+      return { ok: false, error: "We couldn't update your public page. Try again in a moment." };
     }
 
     await refreshLibraryProfileCompletenessScore(libraryBranchId);
@@ -460,5 +323,5 @@ export async function updateOwnerSubmissionPlans(formData: FormData) {
     });
   }
 
-  redirect("/for-owners?plans_updated=1");
+  return { ok: true };
 }

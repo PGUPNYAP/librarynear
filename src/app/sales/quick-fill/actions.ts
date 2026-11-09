@@ -6,12 +6,11 @@ import { getCurrentActorUserId, logLibraryActivity } from "@/lib/library-activit
 import { getLibraryCacheTarget, revalidateLibraryContent } from "@/lib/revalidate-library-content";
 import { refreshLibraryProfileCompletenessScore } from "@/lib/library-profile-score-server";
 import { buildLibraryFeePlanInsertRows, normalizePlanDrafts, type LibraryPlanDraft } from "@/lib/library-plans";
-import { hasValidTimeRange } from "@/lib/owner-form-validation";
+import { feeError, hoursError, phoneError, seatsError, type HoursMode } from "@/lib/library-form";
 import { normalizeIndianPhone } from "@/lib/phone";
-import { AMENITIES } from "@/lib/amenities";
 
 export type QuickFillInput = {
-  open24: boolean;
+  hoursMode: HoursMode;
   openingTime: string;
   closingTime: string;
   amenities: string[];
@@ -22,20 +21,26 @@ export type QuickFillInput = {
   verified: boolean;
 };
 
-export type QuickFillResult = { ok: true; changed: string[] } | { ok: false; error: string };
-
-const ALLOWED_AMENITIES = new Set(AMENITIES.map((amenity) => amenity.label));
+export type QuickFillErrors = Partial<Record<"hours" | "phone" | "seats" | "unreservedFee" | "reservedFee", string>>;
+export type QuickFillResult = { ok: true; changed: string[] } | { ok: false; error: string; fieldErrors?: QuickFillErrors };
 
 function parseFee(value: string) {
-  if (!value.trim()) return null;
-  const amount = Number(value.replace(/[^\d]/g, ""));
-  return Number.isInteger(amount) && amount >= 100 && amount <= 100000 ? amount : NaN;
+  return value.trim() ? Number(value.replace(/[^\d]/g, "")) : null;
 }
 
-/** Fill the basics of a library in one quick step (sales and admins). */
+/** Fill the basics of a library in one quick step (sales and admins). Blank fields are left alone. */
 export async function quickFillLibrary(libraryId: string, input: QuickFillInput): Promise<QuickFillResult> {
   const staff = await getLibraryMutationAccess(libraryId);
   if (!staff) return { ok: false, error: "You can only update libraries in your assigned localities." };
+
+  const fieldErrors: QuickFillErrors = {
+    hours: hoursError({ mode: input.hoursMode, opening: input.openingTime, closing: input.closingTime }, false) ?? undefined,
+    phone: phoneError(input.phone) ?? undefined,
+    seats: seatsError(input.seats) ?? undefined,
+    unreservedFee: feeError(input.unreservedFee) ?? undefined,
+    reservedFee: feeError(input.reservedFee) ?? undefined,
+  };
+  if (Object.values(fieldErrors).some(Boolean)) return { ok: false, error: "Please fix the highlighted fields.", fieldErrors };
 
   const { data: row } = await supabaseServer
     .from("library_branches")
@@ -44,6 +49,7 @@ export async function quickFillLibrary(libraryId: string, input: QuickFillInput)
     .maybeSingle();
   const library = row as unknown as
     | (Record<string, unknown> & {
+        is_active: boolean | null;
         opening_time: string | null;
         closing_time: string | null;
         amenities_text: string | null;
@@ -53,17 +59,15 @@ export async function quickFillLibrary(libraryId: string, input: QuickFillInput)
         library_fee_plans: Array<Record<string, unknown> & { is_active: boolean | null }> | null;
       })
     | null;
-  if (!library) return { ok: false, error: "Library not found." };
+  if (!library || library.is_active === false) return { ok: false, error: "This library has been removed. Skip to the next one." };
 
   const fields: Record<string, unknown> = {};
   const changed: string[] = [];
 
-  // Hours
-  const opening = input.open24 ? "00:00" : input.openingTime.trim();
-  const closing = input.open24 ? "00:00" : input.closingTime.trim();
-  if (opening || closing) {
-    if (!opening || !closing) return { ok: false, error: "Enter both opening and closing time (or tick 24 hours)." };
-    if (!hasValidTimeRange(opening, closing)) return { ok: false, error: "Enter valid times. Overnight (18:00 to 02:00) is fine." };
+  // Hours ("Not known" leaves whatever is saved)
+  if (input.hoursMode !== "unknown") {
+    const opening = input.hoursMode === "24h" ? "00:00" : input.openingTime;
+    const closing = input.hoursMode === "24h" ? "00:00" : input.closingTime;
     if (opening !== library.opening_time?.slice(0, 5) || closing !== library.closing_time?.slice(0, 5)) {
       fields.opening_time = opening;
       fields.closing_time = closing;
@@ -71,8 +75,8 @@ export async function quickFillLibrary(libraryId: string, input: QuickFillInput)
     }
   }
 
-  // Amenities (only known labels)
-  const amenities = [...new Set(input.amenities.filter((label) => ALLOWED_AMENITIES.has(label)))];
+  // Amenities (older free-text ones already on the library stay)
+  const amenities = [...new Set(input.amenities.map((label) => label.trim()).filter(Boolean))].slice(0, 30);
   if (amenities.length > 0) {
     const text = amenities.join(", ");
     if (text !== library.amenities_text) {
@@ -83,8 +87,7 @@ export async function quickFillLibrary(libraryId: string, input: QuickFillInput)
 
   // Seats
   if (input.seats.trim()) {
-    const seats = Number.parseInt(input.seats, 10);
-    if (!Number.isInteger(seats) || seats < 1 || seats > 5000) return { ok: false, error: "Seats must be between 1 and 5000." };
+    const seats = Number(input.seats);
     if (seats !== library.total_seats) {
       fields.total_seats = seats;
       changed.push("total_seats");
@@ -94,21 +97,23 @@ export async function quickFillLibrary(libraryId: string, input: QuickFillInput)
   // Phone
   if (input.phone.trim()) {
     const phone = normalizeIndianPhone(input.phone);
-    if (!phone) return { ok: false, error: "Phone must be a 10-digit Indian number." };
-    if (phone !== library.phone_number) {
+    if (phone && phone !== library.phone_number) {
       fields.phone_number = phone;
       changed.push("phone_number");
     }
   }
 
   // Fees -> regular 1-month plans for each seat type; other plans are kept.
+  const existing = normalizePlanDrafts((library.library_fee_plans ?? []).filter((plan) => plan.is_active !== false));
+  const currentFee = (seat: "unreserved" | "reserved") =>
+    existing.find((plan) => plan.plan_category === "regular" && plan.duration_key === "1_month" && plan.seat_type === seat)?.base_price ?? null;
   const unreserved = parseFee(input.unreservedFee);
   const reserved = parseFee(input.reservedFee);
-  if (Number.isNaN(unreserved) || Number.isNaN(reserved)) return { ok: false, error: "Fees must be between ₹100 and ₹1,00,000." };
+  const unreservedNew = unreserved !== null && unreserved !== currentFee("unreserved");
+  const reservedNew = reserved !== null && reserved !== currentFee("reserved");
   let plans: ReturnType<typeof buildLibraryFeePlanInsertRows> | null = null;
-  if (unreserved !== null || reserved !== null) {
-    const existing = normalizePlanDrafts((library.library_fee_plans ?? []).filter((plan) => plan.is_active !== false));
-    const replaced = new Set([unreserved !== null ? "unreserved" : null, reserved !== null ? "reserved" : null].filter(Boolean));
+  if (unreservedNew || reservedNew) {
+    const replaced = new Set([unreservedNew ? "unreserved" : null, reservedNew ? "reserved" : null].filter(Boolean));
     const kept = existing.filter(
       (plan) => !(plan.plan_category === "regular" && plan.duration_key === "1_month" && replaced.has(plan.seat_type)),
     );
@@ -125,8 +130,8 @@ export async function quickFillLibrary(libraryId: string, input: QuickFillInput)
       offer_name: "",
     });
     const next = [
-      ...(unreserved !== null ? [make("unreserved", unreserved)] : []),
-      ...(reserved !== null ? [make("reserved", reserved)] : []),
+      ...(unreservedNew ? [make("unreserved", unreserved)] : []),
+      ...(reservedNew ? [make("reserved", reserved)] : []),
       ...kept,
     ];
     plans = buildLibraryFeePlanInsertRows(next, libraryId);
@@ -141,21 +146,11 @@ export async function quickFillLibrary(libraryId: string, input: QuickFillInput)
   fields.last_sales_reviewer_id = actorUserId;
   const previousTarget = await getLibraryCacheTarget(libraryId);
 
-  // Atomic when the migration is applied; plain updates otherwise.
+  // One transaction: details and fees succeed or fail together.
   const rpc = await supabaseServer.rpc("update_library_with_plans" as never, { p_library_id: libraryId, p_fields: fields, p_plans: plans } as never);
   if (rpc.error) {
-    if (!/function|does not exist|schema cache/i.test(rpc.error.message)) {
-      return { ok: false, error: "Could not save. Please try again." };
-    }
-    const { error } = await supabaseServer.from("library_branches").update(fields as never).eq("id", libraryId);
-    if (error) return { ok: false, error: "Could not save. Please try again." };
-    if (plans) {
-      const { error: planError } = await supabaseServer.rpc("replace_library_fee_plans" as never, {
-        p_library_branch_id: libraryId,
-        p_plans: plans,
-      } as never);
-      if (planError) return { ok: false, error: "Saved details, but fees failed. Please try again." };
-    }
+    console.error("quick fill failed:", rpc.error.message);
+    return { ok: false, error: "Couldn't save, and nothing was changed. Try again in a moment." };
   }
 
   if (input.verified && library.verification_status !== "verified") {

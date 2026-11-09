@@ -1,21 +1,12 @@
 import { CheckCircle2, Clock3, LockKeyhole, MapPin, ShieldCheck } from "lucide-react";
 import { GoogleLoginButton } from "@/components/auth/google-login-button";
 import { IntentLink } from "@/components/intent-link";
-import { Input } from "@/components/ui/input";
-import { submitOwnerLibrary } from "@/app/for-owners/actions";
-import { OwnerPhotosInput } from "@/app/for-owners/owner-photos-input";
 import { getCurrentViewer, upsertProfileFromUser } from "@/lib/auth/profile";
 import { supabaseServer } from "@/lib/supabase-server";
 import { logPerf, measureAsync } from "@/lib/perf";
-import { PlansEditor } from "@/components/library-form/plans-editor";
-import { AmenitiesChecklist } from "@/components/library-form/amenities-checklist";
-import { MapCoordinatesFields } from "@/components/library-form/map-coordinates-fields";
-import { FormDraftPersistence } from "@/components/library-form/form-draft-persistence";
 import { OwnerSubmissionPlansForm } from "./owner-submission-plans-form";
+import { OwnerLibraryForm } from "./owner-library-form";
 import type { Json } from "@/types/supabase";
-import { PhoneWhatsappFields } from "@/components/library-form/phone-whatsapp-fields";
-import type { LibraryPlanDraft } from "@/lib/library-plans";
-import { OwnerSubmissionSubmitButton } from "./owner-submission-submit-button";
 
 type OwnerSubmissionRow = {
   id: string;
@@ -42,13 +33,6 @@ type OwnerSubmissionRow = {
   created_at: string | null;
   fee_plans: Json | null;
 };
-
-function parseAmenities(value: string | null) {
-  return String(value ?? "")
-    .split(/[,|\n]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
 
 import { getSiteUrl } from "@/lib/site-url";
 
@@ -80,45 +64,12 @@ function statusLabel(status: string) {
   }
 }
 
-function errorMessage(error?: string) {
-  switch (error) {
-    case "duplicate_submission":
-      return "You already have one library submission with this account. You can now edit only your plans below.";
-    case "image_upload_failed":
-      return "We could not upload one of the photos right now. Please try again.";
-    case "too_many_images":
-      return "Please upload up to 3 photos only.";
-    case "too_few_images":
-      return "Please upload at least 1 photo to continue.";
-    case "invalid_image":
-      return "Please upload JPG, PNG, WebP or HEIC photos only, up to 5 MB each.";
-    case "invalid_phone":
-      return "Please enter a valid Indian phone number. WhatsApp must be a mobile number.";
-    case "invalid_map_link":
-      return "Please add a valid Google Maps link.";
-    case "unresolvable_map_link":
-      return "We could not extract coordinates from that Google Maps link after resolving it. Please use the full share link or enter latitude and longitude manually.";
-    case "invalid_coordinates":
-      return "Please provide a valid latitude and longitude. We can auto-fill them from the Google Maps link when possible.";
-    case "invalid_pin_code":
-      return "Please enter a valid 6-digit PIN code.";
-    case "invalid_timings":
-      return "Please enter valid opening and closing times. Overnight hours (e.g. 6 PM to 2 AM) are fine; tick “Open 24 hours” for 24-hour libraries.";
-    case "invalid_plan_description":
-      return "Each plan description can have up to 30 words only.";
-    case "missing_required_fields":
-      return "Please fill all compulsory fields marked with * and try again.";
-    default:
-      return "We could not submit your listing just yet. Please review the required fields and try again.";
-  }
-}
-
 export default async function ForOwnersPage({
   searchParams,
 }: {
-  searchParams: Promise<{ submitted?: string; error?: string; plans_updated?: string; plans_error?: string }>;
+  searchParams: Promise<{ submitted?: string }>;
 }) {
-  const { submitted, error, plans_updated, plans_error } = await searchParams;
+  const { submitted } = await searchParams;
   const { user } = await getCurrentViewer();
 
   if (user) {
@@ -144,7 +95,6 @@ export default async function ForOwnersPage({
       ? latestSubmission
       : null;
   const hasLockedSubmission = Boolean(latestSubmission) && !editableSubmission;
-  const placeholderOnlyEditMode = Boolean(editableSubmission);
 
   if (submissionsMeasurement) {
     logPerf("forOwners", [submissionsMeasurement.metric], `user=1 submissions=${submissions.length}`);
@@ -218,7 +168,7 @@ export default async function ForOwnersPage({
         </div>
       </section>
 
-      <section className="container mx-auto px-6 py-12 md:px-10">
+      <section className="container mx-auto px-3 py-6 sm:px-6 md:px-10 md:py-12">
         {!user ? (
           <div className="mx-auto max-w-2xl rounded-3xl border border-border/60 bg-white p-10 text-center shadow-xl shadow-black/5">
             <div className="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-full bg-[#E5EDF4] text-primary">
@@ -282,26 +232,6 @@ export default async function ForOwnersPage({
                   Your library submission is in review. We have locked the rest of the form and left plan editing available here.
                 </div>
               ) : null}
-              {error ? (
-                <div className="mb-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                  {errorMessage(error)}
-                </div>
-              ) : null}
-              {plans_updated === "1" ? (
-                <div className="mb-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-                  Your plans were updated successfully.
-                </div>
-              ) : null}
-              {plans_error === "1" ? (
-                <div className="mb-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                  We could not update those plans right now. Please try again.
-                </div>
-              ) : null}
-              {plans_error === "empty" ? (
-                <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                  No plans were saved, so we kept your current plans. To remove every plan, tick “I want to remove all plans” and save again.
-                </div>
-              ) : null}
 
               <div className="space-y-3">
                 {(submissions as OwnerSubmissionRow[]).map((submission) => (
@@ -338,16 +268,12 @@ export default async function ForOwnersPage({
           <div className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
             <div
               id="owner-form"
-              className="rounded-3xl border-0 bg-white p-6 shadow-md md:p-8"
+              className="rounded-2xl border-0 bg-white p-4 shadow-md sm:p-6 md:p-8"
             >
               <div className="mb-6">
-                <h2 className="text-2xl font-bold text-black">Guided owner onboarding</h2>
-                <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                  {editableSubmission
-                    ? "Review the notes, update your details, and resubmit. Fields marked with "
-                    : "Fill your first library submission carefully. Fields marked with "}
-                  <span className="font-semibold text-black">*</span>
-                  {" are compulsory."}
+                <h2 className="text-2xl font-bold text-black">List your library in 2 minutes</h2>
+                <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                  {editableSubmission ? "Update what's needed and resubmit." : "Paste your Google Maps link and we fill in most of this for you."}
                 </p>
               </div>
 
@@ -371,173 +297,7 @@ export default async function ForOwnersPage({
                 </div>
               ) : null}
 
-              {error && (
-                <div className="mb-5 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                  {errorMessage(error)}
-                </div>
-              )}
-
-              <form action={submitOwnerLibrary} className="grid gap-5" id="owner-library-form">
-                <FormDraftPersistence
-                  formId="owner-library-form"
-                  storageKey="owner-library-form-draft"
-                  clearOnMount={submitted === "1"}
-                />
-                <div className="border-b border-border pb-2">
-                  <h3 className="text-sm font-semibold text-black">Core Details</h3>
-                </div>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <label htmlFor="display_name" className="text-sm font-medium text-black">Display name <span className="text-destructive">*</span></label>
-                    <Input id="display_name" name="display_name" placeholder={editableSubmission?.display_name ?? "Example Library, Rajendra Nagar"} className="rounded-2xl border-border/80 bg-slate-50/50 shadow-sm focus-visible:ring-primary/30" required={!placeholderOnlyEditMode} />
-                  </div>
-                  <div className="space-y-2">
-                    <label htmlFor="locality" className="text-sm font-medium text-black">Locality <span className="text-destructive">*</span></label>
-                    <Input id="locality" name="locality" placeholder={editableSubmission?.locality ?? "Mukherjee Nagar"} className="rounded-2xl border-border/80 bg-slate-50/50 shadow-sm focus-visible:ring-primary/30" required={!placeholderOnlyEditMode} />
-                  </div>
-                </div>
-
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <label htmlFor="city" className="text-sm font-medium text-black">City <span className="text-destructive">*</span></label>
-                    <Input id="city" name="city" placeholder={editableSubmission?.city ?? "Delhi"} className="rounded-2xl border-border/80 bg-slate-50/50 shadow-sm focus-visible:ring-primary/30" required={!placeholderOnlyEditMode} />
-                  </div>
-                  <div className="space-y-2">
-                    <label htmlFor="district" className="text-sm font-medium text-black">District</label>
-                    <Input id="district" name="district" placeholder={editableSubmission?.district ?? "District"} className="rounded-2xl border-border/80 bg-slate-50/50 shadow-sm focus-visible:ring-primary/30" />
-                    {placeholderOnlyEditMode && editableSubmission?.district ? (
-                      <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <input type="checkbox" name="clear_district" /> Remove saved district
-                      </label>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="border-b border-border pb-2 pt-2">
-                  <h3 className="text-sm font-semibold text-black">Location Details</h3>
-                </div>
-                <div className="space-y-2">
-                  <label htmlFor="full_address" className="text-sm font-medium text-black">Full address <span className="text-destructive">*</span></label>
-                  <textarea
-                    id="full_address"
-                    name="full_address"
-                    rows={3}
-                    placeholder={editableSubmission?.full_address ?? "House number, street, landmark, locality"}
-                    className="w-full rounded-2xl border border-border/80 bg-slate-50/50 px-3 py-2 text-sm outline-none transition-colors shadow-sm focus-visible:border-primary/50 focus-visible:ring-3 focus-visible:ring-primary/30"
-                    required={!placeholderOnlyEditMode}
-                  />
-                </div>
-
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <label htmlFor="state" className="text-sm font-medium text-black">State <span className="text-destructive">*</span></label>
-                     <Input id="state" name="state" placeholder={editableSubmission?.state ?? "Delhi"} className="rounded-2xl border-border/80 bg-slate-50/50 shadow-sm focus-visible:ring-primary/30" required={!placeholderOnlyEditMode} />
-                  </div>
-                  <div className="space-y-2">
-                    <label htmlFor="pin_code" className="text-sm font-medium text-black">PIN code <span className="text-destructive">*</span></label>
-                     <Input id="pin_code" name="pin_code" placeholder={editableSubmission?.pin_code ?? "110001"} className="rounded-2xl border-border/80 bg-slate-50/50 shadow-sm focus-visible:ring-primary/30" required={!placeholderOnlyEditMode} />
-                  </div>
-                </div>
-
-                <MapCoordinatesFields
-                  storageKey="owner-library-map-fields"
-                  initialMapLink={editableSubmission?.map_link ?? ""}
-                  initialLatitude={editableSubmission?.latitude ?? null}
-                  initialLongitude={editableSubmission?.longitude ?? null}
-                  mapLinkRequired={!placeholderOnlyEditMode}
-                  coordinatesRequired={!placeholderOnlyEditMode}
-                  clearOnMount={submitted === "1"}
-                  helperText="Nearest metro will be calculated automatically from your location."
-                  usePlaceholdersOnly={placeholderOnlyEditMode}
-                />
-
-                <div className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900">
-                  Nearest metro will be calculated automatically from your location.
-                </div>
-
-                <div className="border-b border-border pb-2 pt-2">
-                  <h3 className="text-sm font-semibold text-black">Facilities & Logistics</h3>
-                </div>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <label htmlFor="opening_time" className="text-sm font-medium text-black">Opening time <span className="text-destructive">*</span></label>
-                     <Input id="opening_time" name="opening_time" type="time" placeholder={editableSubmission?.opening_time ?? "HH:MM"} className="rounded-2xl border-border/80 bg-slate-50/50 shadow-sm focus-visible:ring-primary/30" required={!placeholderOnlyEditMode} />
-                  </div>
-                  <div className="space-y-2">
-                    <label htmlFor="closing_time" className="text-sm font-medium text-black">Closing time <span className="text-destructive">*</span></label>
-                     <Input id="closing_time" name="closing_time" type="time" placeholder={editableSubmission?.closing_time ?? "HH:MM"} className="rounded-2xl border-border/80 bg-slate-50/50 shadow-sm focus-visible:ring-primary/30" required={!placeholderOnlyEditMode} />
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-                  <label className="flex items-center gap-2 font-medium text-black">
-                    <input type="checkbox" name="open_24h" />
-                    Open 24 hours
-                  </label>
-                  <p className="text-xs text-muted-foreground">
-                    Open past midnight? Enter the closing time as it is (e.g. 6:00 PM to 2:00 AM).
-                  </p>
-                </div>
-
-                <div className="grid gap-4 md:grid-cols-3">
-                  <PhoneWhatsappFields
-                    initialPhone={editableSubmission?.phone_number ?? ""}
-                    initialWhatsapp={editableSubmission?.whatsapp_number ?? ""}
-                    storageKey="owner-library-phone-fields"
-                    clearOnMount={submitted === "1"}
-                    usePlaceholdersOnly={placeholderOnlyEditMode}
-                    phoneRequired={!placeholderOnlyEditMode}
-                  />
-                </div>
-                {placeholderOnlyEditMode ? (
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <input type="checkbox" name="clear_whatsapp_number" /> Remove the saved WhatsApp number
-                  </label>
-                ) : null}
-
-                <div className="space-y-2">
-                  <label htmlFor="amenities" className="text-sm font-medium text-black">Amenities <span className="text-destructive">*</span></label>
-                  <AmenitiesChecklist initialSelected={parseAmenities(editableSubmission?.amenities_text ?? null)} />
-                </div>
-
-                <div className="border-b border-border pb-2 pt-2">
-                  <h3 className="text-sm font-semibold text-black">About & Seats</h3>
-                </div>
-                <div className="space-y-2">
-                  <label htmlFor="description" className="text-sm font-medium text-black">Description of library</label>
-                  <textarea
-                    id="description"
-                    name="description"
-                    rows={4}
-                    placeholder={editableSubmission?.description ?? "Tell students what makes your library a great place to study."}
-                    maxLength={2000}
-                    className="w-full rounded-2xl border border-border/80 bg-slate-50/50 px-3 py-2 text-sm outline-none transition-colors shadow-sm focus-visible:border-primary/50 focus-visible:ring-3 focus-visible:ring-primary/30"
-                  />
-                  {placeholderOnlyEditMode ? (
-                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <input type="checkbox" name="clear_description" /> Remove the saved description
-                    </label>
-                  ) : null}
-                </div>
-
-                <div className="space-y-2">
-                  <label htmlFor="total_seats" className="text-sm font-medium text-black">Seats available <span className="text-destructive">*</span></label>
-                  <Input id="total_seats" name="total_seats" type="number" min="1" placeholder={editableSubmission?.total_seats ? String(editableSubmission.total_seats) : "Seats available"} className="rounded-2xl border-border/80 bg-slate-50/50 shadow-sm focus-visible:ring-primary/30" required={!placeholderOnlyEditMode} />
-                </div>
-
-                <PlansEditor
-                  initialPlans={(Array.isArray(editableSubmission?.fee_plans) ? editableSubmission?.fee_plans : []) as Partial<LibraryPlanDraft>[]}
-                  storageKey="owner-library-plan-draft"
-                  title="Plans"
-                  note="Plans are optional. Use Regular or Offer, add discount percentages, and we will calculate the clean discounted price automatically."
-                  clearOnMount={submitted === "1"}
-                />
-
-                <OwnerPhotosInput initialImageUrls={editableSubmission?.image_urls ?? []} />
-
-                <OwnerSubmissionSubmitButton formId="owner-library-form" className="mt-4 h-12 w-full rounded-full bg-[#0F74C5] px-8 text-sm font-semibold shadow-md hover:bg-[#0F74C5]/90 md:w-auto">
-                  {editableSubmission ? "Resubmit for review" : "Submit for review"}
-                </OwnerSubmissionSubmitButton>
-              </form>
+              <OwnerLibraryForm submission={editableSubmission} />
             </div>
 
             <div className="space-y-6">

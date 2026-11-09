@@ -1,59 +1,81 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { Check, Loader2 } from "lucide-react";
 import type { Json } from "@/types/supabase";
-import { PlansEditor } from "@/components/library-form/plans-editor";
-import { FormSubmitButton } from "@/components/form-submit-button";
+import { PlanRowsEditor } from "@/components/library-form/plan-rows-editor";
 import { updateOwnerSubmissionPlans } from "@/app/for-owners/actions";
-import { normalizePlanDrafts } from "@/lib/library-plans";
+import { planDraftsToRows, validateLibraryForm, emptyLibraryFormValues, type FieldErrors, type PlanRow } from "@/lib/library-form";
 
-export function OwnerSubmissionPlansForm({
-  submissionId,
-  displayName,
-  feePlans,
-}: {
-  submissionId: string;
-  displayName: string;
-  feePlans: Json | null;
-}) {
-  const [open, setOpen] = useState(true);
+function validate(rows: PlanRow[]) {
+  const all = validateLibraryForm({ ...emptyLibraryFormValues(), plans: rows }, { mode: "staff" });
+  const planErrors: FieldErrors = {};
+  for (const [key, message] of Object.entries(all)) if (key.startsWith("plans")) planErrors[key] = message;
+  return planErrors;
+}
+
+export function OwnerSubmissionPlansForm({ submissionId, displayName, feePlans }: { submissionId: string; displayName: string; feePlans: Json | null }) {
+  const router = useRouter();
+  const initial = useMemo(() => planDraftsToRows(feePlans), [feePlans]);
+  const [rows, setRows] = useState<PlanRow[]>(initial);
+  const [errors, setErrors] = useState<FieldErrors>({});
+  const [status, setStatus] = useState<{ kind: "saved" | "error"; message: string } | null>(null);
+  const [confirmEmpty, setConfirmEmpty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const hasAnyPlan = rows.some((row) => row.base_price.trim());
+
+  const save = async (removeAll = false) => {
+    if (savingRef.current) return;
+    setStatus(null);
+    const found = validate(rows);
+    setErrors(found);
+    if (Object.keys(found).length > 0) return;
+    if (!hasAnyPlan && initial.length > 0 && !removeAll) {
+      setConfirmEmpty(true);
+      return;
+    }
+    setConfirmEmpty(false);
+    savingRef.current = true;
+    setSaving(true);
+    const result = await updateOwnerSubmissionPlans(submissionId, rows, removeAll).catch(() => ({ ok: false as const, error: "We couldn't reach the server. Your plans are safe here, so try again." }));
+    savingRef.current = false;
+    setSaving(false);
+    if (result.ok) {
+      setStatus({ kind: "saved", message: "Plans saved." });
+      router.refresh();
+    } else {
+      setStatus({ kind: "error", message: result.error });
+    }
+  };
 
   return (
-    <div className="rounded-2xl border border-border/70 bg-white p-4">
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div>
-          <p className="font-semibold text-black">{displayName}</p>
-          <p className="text-xs text-muted-foreground">
-            You can edit plans here. To change any other details, please contact us.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setOpen((current) => !current)}
-          className="rounded-full border border-border px-4 py-2 text-sm font-medium hover:bg-muted/50"
-        >
-          {open ? "Close plan editor" : "Edit plans only"}
-        </button>
+    <div className="space-y-3">
+      <div>
+        <p className="font-semibold text-black">{displayName}</p>
+        <p className="text-xs text-muted-foreground">Plan changes go live on your public page right away. For anything else, contact us.</p>
       </div>
-
-      {open ? (
-        <form action={updateOwnerSubmissionPlans} className="mt-4 space-y-4">
-          <input type="hidden" name="submission_id" value={submissionId} />
-          <PlansEditor
-            initialPlans={normalizePlanDrafts(feePlans)}
-            storageKey={`owner-submission-plans:${submissionId}`}
-            note="Need to update address, phone, timings, or anything else? Please contact us and our team will help."
-          />
-          <p className="text-xs text-muted-foreground">Plan changes go live on your public page right away.</p>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-            <input type="checkbox" name="confirm_remove_all_plans" />
-            I want to remove all plans (only needed if you deleted every plan above)
-          </label>
-          <FormSubmitButton className="rounded-full bg-primary px-6 text-white hover:bg-primary/90">
-            Save updated plans
-          </FormSubmitButton>
-        </form>
+      <PlanRowsEditor rows={rows} errors={errors} onChange={(next) => { setRows(next); setStatus(null); setConfirmEmpty(false); }} />
+      {confirmEmpty ? (
+        <div role="alert" className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-900">
+          <p>This removes every plan from your page. Students won&apos;t see any fees.</p>
+          <div className="mt-2 flex gap-4 font-semibold">
+            <button type="button" onClick={() => void save(true)} className="hover:underline">Remove all plans</button>
+            <button type="button" onClick={() => { setConfirmEmpty(false); setRows(initial); }} className="hover:underline">Keep my plans</button>
+          </div>
+        </div>
       ) : null}
+      {status ? (
+        <p role="status" className={`flex items-center gap-1.5 text-sm ${status.kind === "saved" ? "text-emerald-700" : "text-rose-700"}`}>
+          {status.kind === "saved" ? <Check className="h-4 w-4" aria-hidden /> : null}
+          {status.message}
+        </p>
+      ) : null}
+      <button type="button" onClick={() => void save()} disabled={saving} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-primary px-6 text-sm font-semibold text-white disabled:opacity-60">
+        {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+        {saving ? "Saving" : "Save plans"}
+      </button>
     </div>
   );
 }

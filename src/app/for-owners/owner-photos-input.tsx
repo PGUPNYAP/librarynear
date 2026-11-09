@@ -53,13 +53,20 @@ function getUploadState(photos: PhotoItem[]) {
   return "missing";
 }
 
+export type OwnerPhotosState = {
+  uploadState: "missing" | "uploading" | "failed" | "ready";
+  existing: string[];
+  uploaded: Array<{ url: string; fileId: string }>;
+};
+
 export function OwnerPhotosInput({
   initialImageUrls = [],
+  onChange,
 }: {
   initialImageUrls?: string[];
+  onChange: (state: OwnerPhotosState) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const statusInputRef = useRef<HTMLInputElement>(null);
   const objectUrlsRef = useRef<Set<string>>(new Set());
   const [photos, setPhotos] = useState<PhotoItem[]>(
     initialImageUrls.map((url, index) => ({
@@ -87,12 +94,14 @@ export function OwnerPhotosInput({
   }, []);
 
   useEffect(() => {
-    const statusInput = statusInputRef.current;
-    if (!statusInput) return;
-    statusInput.value = uploadState;
-    statusInput.dispatchEvent(new Event("input", { bubbles: true }));
-    statusInput.dispatchEvent(new CustomEvent("owner-photo-upload-state-change", { bubbles: true }));
-  }, [uploadState]);
+    onChange({
+      uploadState,
+      existing: photos.filter((photo) => photo.status === "existing").map((photo) => photo.url),
+      uploaded: photos.filter((photo) => photo.status === "uploaded" && photo.fileId).map((photo) => ({ url: photo.url, fileId: photo.fileId! })),
+    });
+    // onChange is a fresh closure on every parent render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [photos, uploadState]);
 
   async function uploadPhoto(file: File, photoId: string, previewUrl: string) {
     const uploadFormData = new FormData();
@@ -271,14 +280,8 @@ export function OwnerPhotosInput({
     setError(null);
   }
 
-  const uploadedPhotos = photos.filter((photo) => photo.status === "uploaded");
-  const existingPhotos = photos.filter((photo) => photo.status === "existing");
-
   return (
     <div className="space-y-3">
-      <label htmlFor="photos" className="text-sm font-medium text-black">
-        Photos <span className="text-destructive">*</span>
-      </label>
       <input
         ref={inputRef}
         id="photos"
@@ -288,17 +291,6 @@ export function OwnerPhotosInput({
         className="sr-only"
         onChange={handleFileChange}
       />
-      <input ref={statusInputRef} type="hidden" name="photo_upload_state" value={uploadState} readOnly />
-      {existingPhotos.map((photo) => (
-        <input key={photo.id} type="hidden" name="existing_image_urls" value={photo.url} readOnly />
-      ))}
-      {uploadedPhotos.map((photo) => (
-        <input key={photo.id} type="hidden" name="uploaded_image_urls" value={photo.url} readOnly />
-      ))}
-      {uploadedPhotos.map((photo) => (
-        <input key={`${photo.id}-file`} type="hidden" name="uploaded_image_file_ids" value={photo.fileId ?? ""} readOnly />
-      ))}
-
       <button
         type="button"
         onClick={() => inputRef.current?.click()}

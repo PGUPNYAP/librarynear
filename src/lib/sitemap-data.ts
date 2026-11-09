@@ -1,3 +1,5 @@
+import { getActiveCities } from "@/lib/cities-server";
+import { getCoachingPlaces, getPublishedHubs } from "@/lib/aspirant-pages";
 import "server-only";
 
 import { supabaseServer } from "@/lib/supabase-server";
@@ -169,7 +171,19 @@ export async function buildPagesEntries(): Promise<SitemapEntry[]> {
     { url: `${base}/cities`, changeFrequency: "weekly", priority: 0.7 },
     { url: `${base}/guides/student-emergency`, changeFrequency: "monthly", priority: 0.3 },
     { url: `${base}/guides/librarian-emergency`, changeFrequency: "monthly", priority: 0.3 },
+    { url: `${base}/study-room`, changeFrequency: "weekly", priority: 0.7 },
+    { url: `${base}/guides/moving-to`, changeFrequency: "weekly", priority: 0.7 },
   ];
+
+  const activeCities = await getActiveCities();
+  const nameOf = (slug: string) => activeCities.find((city) => city.slug === slug)?.name ?? null;
+  const hubs = await getPublishedHubs(async (slug) => nameOf(slug));
+  for (const { hub } of hubs) entries.push({ url: `${base}/guides/moving-to/${hub.slug}`, changeFrequency: "weekly", priority: 0.7 });
+  for (const city of activeCities) {
+    const places = await getCoachingPlaces(city.slug, city.name).catch(() => []);
+    if (places.length >= 3) entries.push({ url: `${base}/${city.slug}/near`, changeFrequency: "weekly", priority: 0.6 });
+    for (const place of places) entries.push({ url: `${base}/${city.slug}/near/${encodeURI(place.slug)}`, changeFrequency: "weekly", priority: 0.6 });
+  }
 
   const rows = await fetchAllPlaceRows();
   const cityCounts = new Map<string, number>();

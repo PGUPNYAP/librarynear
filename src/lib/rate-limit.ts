@@ -145,4 +145,7 @@ export const RATE_LIMITS = {
   ownerPlansUpdate: { id: "owner-plans-update", maxRequests: 10, windowMs: 60_000 },
   submitReview: { id: "submit-review", maxRequests: 3, windowMs: 60_000 },
   submitReviewDaily: { id: "submit-review-day", maxRequests: 10, windowMs: 86_400_000 },
+  resolveLocation: { id: "resolve-location", maxRequests: 30, windowMs: 60_000 },
+  studySessionStart: { id: "study-start", maxRequests: 30, windowMs: 3_600_000 },
+  studySessionFinish: { id: "study-finish", maxRequests: 30, windowMs: 3_600_000 },
 } as const;

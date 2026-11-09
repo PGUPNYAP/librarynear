@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { requireApprovedStaff, getAssignedLocalityIds } from "@/lib/staff-access";
 import { supabaseServer } from "@/lib/supabase-server";
-import { FILTERABLE_AMENITIES } from "@/lib/amenities";
+import { AMENITY_LABELS } from "@/lib/library-form";
 import { parseAmenitiesText } from "@/lib/library-filters";
 import { formatIndianPhone, toTelHref } from "@/lib/phone";
 import { citySlug } from "@/lib/places";
@@ -11,9 +11,9 @@ import { QuickFillForm } from "./quick-fill-form";
  * One library at a time: the next library in your localities that is missing
  * hours or amenities. Fill what you learn on a call and move on.
  */
-export default async function QuickFillPage({ searchParams }: { searchParams: Promise<{ skip?: string }> }) {
+export default async function QuickFillPage({ searchParams }: { searchParams: Promise<{ skip?: string; saved?: string }> }) {
   const staff = await requireApprovedStaff(["sales", "admin"]);
-  const { skip } = await searchParams;
+  const { skip, saved } = await searchParams;
   const offset = Math.max(0, Math.min(Number(skip) || 0, 100000));
 
   const localityIds = staff.effectiveRole === "sales" ? await getAssignedLocalityIds(staff.user.id) : null;
@@ -28,7 +28,7 @@ export default async function QuickFillPage({ searchParams }: { searchParams: Pr
 
   let query = supabaseServer
     .from("library_branches")
-    .select("id, slug, city, display_name, locality, phone_number, map_link, opening_time, closing_time, amenities_text, total_seats, verification_status", { count: "exact" })
+    .select("id, slug, city, display_name, locality, phone_number, map_link, opening_time, closing_time, amenities_text, total_seats, verification_status, library_fee_plans(plan_category, duration_key, seat_type, base_price, price, is_active)", { count: "exact" })
     .eq("is_active", true)
     .or("opening_time.is.null,amenities_text.is.null")
     // Libraries with a phone number first: they can be filled from a call.
@@ -39,7 +39,23 @@ export default async function QuickFillPage({ searchParams }: { searchParams: Pr
   if (localityIds) query = query.in("locality_id", localityIds);
 
   const { data, count } = await query;
-  const library = data?.[0];
+  const library = data?.[0] as unknown as
+    | {
+        id: string;
+        slug: string;
+        city: string;
+        display_name: string;
+        locality: string | null;
+        phone_number: string | null;
+        map_link: string | null;
+        opening_time: string | null;
+        closing_time: string | null;
+        amenities_text: string | null;
+        total_seats: number | null;
+        verification_status: string | null;
+        library_fee_plans: Array<{ plan_category: string | null; duration_key: string | null; seat_type: string | null; base_price: number | null; price: number | null; is_active: boolean | null }> | null;
+      }
+    | undefined;
   const remaining = count ?? 0;
 
   if (!library) {
@@ -58,9 +74,16 @@ export default async function QuickFillPage({ searchParams }: { searchParams: Pr
 
   const nextHref = `/sales/quick-fill?skip=${offset}`; // saved one drops out of the queue
   const skipHref = `/sales/quick-fill?skip=${offset + 1}`;
+  const plans = library.library_fee_plans ?? [];
+  const monthlyFee = (seat: string) => {
+    const plan = plans.find((item) => item.is_active !== false && item.plan_category === "regular" && item.duration_key === "1_month" && item.seat_type === seat);
+    const amount = plan?.base_price ?? plan?.price;
+    return amount ? String(amount) : "";
+  };
 
   return (
     <div className="mx-auto max-w-xl p-4 md:p-8">
+      {saved ? <p role="status" className="mb-3 rounded-xl bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800">Saved. Here&apos;s the next one.</p> : null}
       <div className="mb-4 flex items-center justify-between text-sm text-muted-foreground">
         <span>{remaining.toLocaleString("en-IN")} libraries still missing details</span>
         <Link href={skipHref} className="font-semibold text-black hover:underline">
@@ -89,22 +112,19 @@ export default async function QuickFillPage({ searchParams }: { searchParams: Pr
             libraryId={library.id}
             nextHref={nextHref}
             phoneHref={toTelHref(library.phone_number)}
-            amenityOptions={FILTERABLE_AMENITIES.map((amenity) => amenity.label)}
+            amenityOptions={AMENITY_LABELS}
             initial={{
               openingTime: library.opening_time?.slice(0, 5) ?? "",
               closingTime: library.closing_time?.slice(0, 5) ?? "",
               amenities: parseAmenitiesText(library.amenities_text),
               seats: library.total_seats ? String(library.total_seats) : "",
-              phone: "",
+              unreservedFee: monthlyFee("unreserved"),
+              reservedFee: monthlyFee("reserved"),
               verified: library.verification_status === "verified",
             }}
           />
         </div>
       </div>
-      {/* Kept for the Skip link */}
-      <p className="mt-3 text-center text-xs text-muted-foreground">
-        <Link href={skipHref} className="hover:underline">Skip this library</Link>
-      </p>
     </div>
   );
 }

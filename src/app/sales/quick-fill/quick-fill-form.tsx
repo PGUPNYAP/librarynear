@@ -1,9 +1,11 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Loader2, Phone } from "lucide-react";
-import { quickFillLibrary } from "./actions";
+import { Loader2, Phone } from "lucide-react";
+import { quickFillLibrary, type QuickFillErrors, type QuickFillResult } from "./actions";
+import { AmenityChips, Field, HoursField, inputClass } from "@/components/library-form/form-controls";
+import { feeError, hoursError, phoneError, seatsError, type HoursMode } from "@/lib/library-form";
 
 type Props = {
   libraryId: string;
@@ -14,54 +16,63 @@ type Props = {
     closingTime: string;
     amenities: string[];
     seats: string;
-    phone: string;
+    unreservedFee: string;
+    reservedFee: string;
     verified: boolean;
   };
   phoneHref: string | null;
 };
 
-/** Fast one-screen form: fill what you learn on the call, then Save & next. */
+/** One screen: fill what you learn on the call, then Save & next. Blank means "didn't find out". */
 export function QuickFillForm({ libraryId, nextHref, amenityOptions, initial, phoneHref }: Props) {
   const router = useRouter();
-  const [pending, startTransition] = useTransition();
+  const [saving, setSaving] = useState(false);
+  const saving_ = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const [open24, setOpen24] = useState(initial.openingTime === "00:00" && initial.closingTime === "00:00");
-  const [openingTime, setOpeningTime] = useState(initial.openingTime);
-  const [closingTime, setClosingTime] = useState(initial.closingTime);
+  const [errors, setErrors] = useState<QuickFillErrors>({});
+  const startMode: HoursMode = initial.openingTime === "00:00" && initial.closingTime === "00:00" ? "24h" : initial.openingTime ? "set" : "unknown";
+  const [hoursMode, setHoursMode] = useState<HoursMode>(startMode);
+  const [openingTime, setOpeningTime] = useState(startMode === "set" ? initial.openingTime : "");
+  const [closingTime, setClosingTime] = useState(startMode === "set" ? initial.closingTime : "");
   const [amenities, setAmenities] = useState<string[]>(initial.amenities);
-  const [unreservedFee, setUnreservedFee] = useState("");
-  const [reservedFee, setReservedFee] = useState("");
+  const [unreservedFee, setUnreservedFee] = useState(initial.unreservedFee);
+  const [reservedFee, setReservedFee] = useState(initial.reservedFee);
   const [seats, setSeats] = useState(initial.seats);
   const [phone, setPhone] = useState("");
   const [verified, setVerified] = useState(initial.verified);
 
-  const toggle = (label: string) =>
-    setAmenities((current) => (current.includes(label) ? current.filter((item) => item !== label) : [...current, label]));
+  const clear = (key: keyof QuickFillErrors) => setErrors((current) => ({ ...current, [key]: undefined }));
 
-  const save = () => {
+  const check = (): QuickFillErrors => ({
+    hours: hoursError({ mode: hoursMode, opening: openingTime, closing: closingTime }, false) ?? undefined,
+    phone: phoneError(phone) ?? undefined,
+    seats: seatsError(seats) ?? undefined,
+    unreservedFee: feeError(unreservedFee) ?? undefined,
+    reservedFee: feeError(reservedFee) ?? undefined,
+  });
+
+  const save = async () => {
+    if (saving_.current) return;
     setError(null);
-    startTransition(async () => {
-      const result = await quickFillLibrary(libraryId, {
-        open24,
-        openingTime,
-        closingTime,
-        amenities,
-        unreservedFee,
-        reservedFee,
-        seats,
-        phone,
-        verified,
-      });
-      if (!result.ok) {
-        setError(result.error);
-        return;
-      }
-      router.push(nextHref);
-      router.refresh();
-    });
+    const found = check();
+    setErrors(found);
+    if (Object.values(found).some(Boolean)) return;
+    saving_.current = true;
+    setSaving(true);
+    const result = await quickFillLibrary(libraryId, { hoursMode, openingTime, closingTime, amenities, unreservedFee, reservedFee, seats, phone, verified }).catch((): QuickFillResult => ({
+      ok: false,
+      error: "We couldn't reach the server. What you typed is still here, so try again.",
+    }));
+    if (!result.ok) {
+      saving_.current = false;
+      setSaving(false);
+      setError(result.error);
+      if (result.fieldErrors) setErrors(result.fieldErrors);
+      return;
+    }
+    router.push(`${nextHref}&saved=1`);
+    router.refresh();
   };
-
-  const input = "w-full rounded-xl border border-border bg-white px-3 py-2.5 text-sm outline-none focus:border-black";
 
   return (
     <div className="space-y-6">
@@ -70,84 +81,52 @@ export function QuickFillForm({ libraryId, nextHref, amenityOptions, initial, ph
           <Phone className="h-4 w-4" /> Call library
         </a>
       ) : (
-        <label className="block">
-          <span className="mb-1 block text-sm font-semibold text-black">Phone (none saved)</span>
-          <input value={phone} onChange={(event) => setPhone(event.target.value)} inputMode="tel" placeholder="98765 43210" className={input} />
-        </label>
+        <Field name="phone" label="Phone" hint="None saved yet." error={errors.phone}>
+          <input id="f-phone" value={phone} onChange={(event) => { setPhone(event.target.value); clear("phone"); }} inputMode="tel" placeholder="98765 43210" aria-invalid={Boolean(errors.phone)} className={inputClass} />
+        </Field>
       )}
 
-      <section>
-        <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-black">Hours</h2>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={open24} onChange={(event) => setOpen24(event.target.checked)} /> Open 24 hours
-          </label>
-        </div>
-        {!open24 ? (
-          <div className="grid grid-cols-2 gap-3">
-            <input type="time" aria-label="Opening time" value={openingTime} onChange={(event) => setOpeningTime(event.target.value)} className={input} />
-            <input type="time" aria-label="Closing time" value={closingTime} onChange={(event) => setClosingTime(event.target.value)} className={input} />
-          </div>
-        ) : null}
-        <p className="mt-1 text-xs text-muted-foreground">Overnight is fine, e.g. 18:00 to 02:00.</p>
-      </section>
-
-      <section>
-        <h2 className="mb-2 text-sm font-semibold text-black">Monthly fee (₹)</h2>
-        <div className="grid grid-cols-2 gap-3">
-          <input value={unreservedFee} onChange={(event) => setUnreservedFee(event.target.value)} inputMode="numeric" placeholder="Unreserved seat" aria-label="Unreserved monthly fee" className={input} />
-          <input value={reservedFee} onChange={(event) => setReservedFee(event.target.value)} inputMode="numeric" placeholder="Reserved seat" aria-label="Reserved monthly fee" className={input} />
-        </div>
-      </section>
-
-      <section>
-        <h2 className="mb-2 text-sm font-semibold text-black">Amenities</h2>
-        <div className="flex flex-wrap gap-2">
-          {amenityOptions.map((label) => {
-            const active = amenities.includes(label);
-            return (
-              <button
-                key={label}
-                type="button"
-                onClick={() => toggle(label)}
-                aria-pressed={active}
-                className={`inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-sm ${active ? "border-black bg-black text-white" : "border-border text-black"}`}
-              >
-                {active ? <Check className="h-3.5 w-3.5" /> : null}
-                {label}
-              </button>
-            );
-          })}
-        </div>
-      </section>
+      <HoursField
+        mode={hoursMode}
+        opening={openingTime}
+        closing={closingTime}
+        allowUnknown
+        error={errors.hours}
+        onChange={(next) => {
+          if (next.mode !== undefined) setHoursMode(next.mode);
+          if (next.opening !== undefined) setOpeningTime(next.opening);
+          if (next.closing !== undefined) setClosingTime(next.closing);
+          clear("hours");
+        }}
+      />
 
       <div className="grid grid-cols-2 gap-3">
-        <label className="block">
-          <span className="mb-1 block text-sm font-semibold text-black">Seats</span>
-          <input value={seats} onChange={(event) => setSeats(event.target.value)} inputMode="numeric" placeholder="e.g. 80" className={input} />
-        </label>
-        <label className="flex items-end gap-2 pb-2.5 text-sm font-semibold text-black">
+        <Field name="unreservedFee" label="Monthly, unreserved (₹)" error={errors.unreservedFee}>
+          <input id="f-unreservedFee" value={unreservedFee} onChange={(event) => { setUnreservedFee(event.target.value.replace(/[^\d]/g, "")); clear("unreservedFee"); }} inputMode="numeric" placeholder="2000" aria-invalid={Boolean(errors.unreservedFee)} className={inputClass} />
+        </Field>
+        <Field name="reservedFee" label="Monthly, reserved (₹)" error={errors.reservedFee}>
+          <input id="f-reservedFee" value={reservedFee} onChange={(event) => { setReservedFee(event.target.value.replace(/[^\d]/g, "")); clear("reservedFee"); }} inputMode="numeric" placeholder="2500" aria-invalid={Boolean(errors.reservedFee)} className={inputClass} />
+        </Field>
+      </div>
+
+      <AmenityChips options={amenityOptions} selected={amenities} onChange={setAmenities} />
+
+      <div className="grid grid-cols-2 items-start gap-3">
+        <Field name="seats" label="Seats" error={errors.seats}>
+          <input id="f-seats" value={seats} onChange={(event) => { setSeats(event.target.value.replace(/[^\d]/g, "")); clear("seats"); }} inputMode="numeric" placeholder="80" aria-invalid={Boolean(errors.seats)} className={inputClass} />
+        </Field>
+        <label className="flex items-center gap-2 pt-8 text-sm font-medium text-black">
           <input type="checkbox" checked={verified} onChange={(event) => setVerified(event.target.checked)} />
-          Verified on call / visit
+          Confirmed on call or visit
         </label>
       </div>
 
-      {error ? <p role="alert" className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p> : null}
+      {error ? <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
 
-      <div className="flex gap-3">
-        <button
-          type="button"
-          onClick={save}
-          disabled={pending}
-          className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-primary py-3 text-sm font-semibold text-white disabled:opacity-60"
-        >
-          {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          Save &amp; next
-        </button>
-        <button type="button" onClick={() => router.push(nextHref)} className="rounded-xl border border-border px-5 py-3 text-sm font-semibold text-black">
-          Skip
-        </button>
-      </div>
+      <button type="button" onClick={() => void save()} disabled={saving} className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-primary text-sm font-semibold text-white disabled:opacity-60">
+        {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+        {saving ? "Saving" : "Save & next"}
+      </button>
     </div>
   );
 }

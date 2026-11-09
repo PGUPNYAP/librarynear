@@ -63,6 +63,8 @@ export function Footer() {
                 <li><Link href="/for-owners" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">List Your Library</Link></li>
                 <li><Link href="/saved" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Favourites</Link></li>
                 <li><Link href="/cities" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Libraries by city</Link></li>
+                <li><Link href="/study-room" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Online study room</Link></li>
+                <li><Link href="/guides/moving-to" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Moving for exam prep</Link></li>
                 <li><Link href="/editorial-policy" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Editorial policy</Link></li>
                 <li><Link href="/privacy" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Privacy Policy</Link></li>
                 <li><Link href="/contact" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Contact</Link></li>

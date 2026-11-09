@@ -45,14 +45,15 @@ Open <http://localhost:3000>.
 
 ## Database
 
-Migrations live in `supabase/migrations` and are applied in filename order. The production-readiness migrations (`20261107000000_*`, `20261107000100_*`, `20261107000200_*`, `20261107000300_*`) add:
+Migrations live in `supabase/migrations` and are applied in filename order. The production-readiness migrations (`20261107000000_*`, `20261107000100_*`, `20261107000200_*`, `20261107000300_*`, `20261109000000_*`) add:
 
 - aggregate RPCs (`city_library_counts`, `city_locality_counts`, `staff_activity_summary`, `staff_activity_daily`, `locality_assignment_overview`) so no page scans whole tables;
 - a trigger that keeps `library_branches.locality_id` in sync with city + locality;
 - `update_library_with_plans`, which saves a library and its fee plans in one transaction;
 - lead workflow columns, staff invites, review history and pending-upload tracking;
 - security fixes (fee plans and reviews can only be written by the server);
-- search learning (aliases, click popularity) and a geocode cache for place lookups.
+- search learning (aliases, click popularity) and a geocode cache for place lookups;
+- anonymous weekly study-room totals per locality (`/study-room`).
 
 ## Search
 
