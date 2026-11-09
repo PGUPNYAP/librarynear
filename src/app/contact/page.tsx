@@ -1,6 +1,8 @@
+import { getSiteUrl } from "@/lib/site-url";
 import { Mail, MapPin, Phone } from "lucide-react";
 
 export const metadata = {
+  alternates: { canonical: `${getSiteUrl()}/contact` },
   title: "Contact",
   description: "Get in touch with LibraryNear.",
 };

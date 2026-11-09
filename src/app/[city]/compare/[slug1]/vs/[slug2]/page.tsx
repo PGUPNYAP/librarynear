@@ -6,6 +6,7 @@ import { getOptimizedImageUrl } from "@/lib/library-images";
 import { getSiteUrl } from "@/lib/site-url";
 import { IntentLink } from "@/components/intent-link";
 import type { Metadata } from "next";
+import { slugToIlikePattern, slugToLabel } from "@/lib/places";
 
 interface PageProps {
   params: Promise<{ city: string; slug1: string; slug2: string }>;
@@ -36,7 +37,7 @@ async function getLibraryForComparison(slug: string, city: string) {
       )
     `)
     .eq("slug", slug)
-    .ilike("city", city)
+    .ilike("city", slugToIlikePattern(city))
     .single();
 
   if (error || !data) return null;
@@ -70,7 +71,7 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
 
   if (!lib1 || !lib2) return {};
 
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/compare/${slug1}/vs/${slug2}`;
   
@@ -118,7 +119,7 @@ export default async function ComparePage({ params }: PageProps) {
 
   if (!lib1 || !lib2) notFound();
 
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/compare/${slug1}/vs/${slug2}`;
 

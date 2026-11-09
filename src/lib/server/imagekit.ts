@@ -22,12 +22,41 @@ export function isOwnerSubmissionImageUrl(url: string, userId: string): boolean 
   }
 }
 
+export type DetectedImageType = "jpg" | "png" | "webp" | "avif" | "heic";
+
+/**
+ * Identify an image by its first bytes instead of trusting the browser-reported
+ * MIME type. SVG (scriptable XML), HTML and anything unknown return null.
+ */
+export function detectImageType(bytes: Uint8Array): DetectedImageType | null {
+  if (bytes.length < 12) return null;
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "jpg";
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "png";
+  const ascii = (start: number, end: number) => String.fromCharCode(...bytes.slice(start, end));
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return "webp";
+  if (ascii(4, 8) === "ftyp") {
+    const brand = ascii(8, 12);
+    if (brand === "avif" || brand === "avis") return "avif";
+    if (["heic", "heix", "hevc", "mif1", "msf1"].includes(brand)) return "heic";
+  }
+  return null;
+}
+
+export async function sniffImageFile(file: File): Promise<DetectedImageType> {
+  const head = new Uint8Array(await file.slice(0, 32).arrayBuffer());
+  const type = detectImageType(head);
+  if (!type) {
+    throw new Error("Only JPG, PNG, WebP, AVIF or HEIC photos are allowed");
+  }
+  return type;
+}
+
 /** Validate a File is a non-empty image within the size limit. Throws on failure. */
 export function assertValidImageFile(file: File, maxBytes: number = MAX_IMAGE_UPLOAD_BYTES) {
   if (!(file instanceof File) || file.size === 0) {
     throw new Error("No image provided");
   }
-  if (!file.type.startsWith("image/")) {
+  if (!file.type.startsWith("image/") || /svg/i.test(file.type)) {
     throw new Error("Only image files are allowed");
   }
   if (file.size > maxBytes) {
@@ -54,10 +83,13 @@ export async function uploadImageKitFile({
   folder: string;
 }) {
   assertValidImageFile(file);
+  // Trust the bytes, not the browser: reject SVG/HTML renamed as .jpg.
+  const detected = await sniffImageFile(file);
+  const safeBase = fileName.replace(/\.[^.]*$/, "").replace(/[^\w-]+/g, "-").slice(0, 80) || "photo";
 
   const formData = new FormData();
   formData.append("file", file);
-  formData.append("fileName", fileName);
+  formData.append("fileName", `${safeBase}.${detected}`);
   formData.append("folder", folder);
 
   const response = await fetch(IMAGEKIT_UPLOAD_URL, {

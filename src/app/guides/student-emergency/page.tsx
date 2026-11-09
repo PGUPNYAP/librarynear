@@ -1,8 +1,10 @@
+import { getSiteUrl } from "@/lib/site-url";
 import { Users, Flame, Stethoscope, Activity, AlertTriangle, ChevronLeft, Map, Ear, Footprints } from "lucide-react";
 import { IntentLink } from "@/components/intent-link";
 
 export const metadata = {
-  title: "Student Safety Guide — LibraryNear",
+  alternates: { canonical: `${getSiteUrl()}/guides/student-emergency` },
+  title: "Student Safety Guide",
   description: "Essential safety instructions and emergency protocols for students inside study libraries.",
 };
 

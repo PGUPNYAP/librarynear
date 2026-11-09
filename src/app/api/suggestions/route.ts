@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase-server";
 import { logPerf, measureAsync, toServerTiming } from "@/lib/perf";
+// High-volume endpoints use the per-instance limiter to avoid a Redis call
+// on every keystroke; forms and uploads use the shared limiter.
 import { checkRateLimit, getClientIp, RATE_LIMITS } from "@/lib/rate-limit";
 import { escapePostgrestFilter } from "@/lib/postgrest";
 import { isValidLatitude, isValidLongitude } from "@/lib/owner-form-validation";
@@ -9,11 +11,16 @@ export const runtime = "edge";
 export const revalidate = 0;
 
 export interface Suggestion {
-  type: "library" | "locality" | "metro" | "nearby";
+  type: "library" | "locality" | "metro" | "nearby" | "place" | "pincode" | "nearme" | "lookup";
+  lat?: number;
+  lng?: number;
+  query?: string;
   label: string;
   slug: string;
   city: string;
   distance_km?: number | null;
+  /** Secondary line, e.g. locality and rating (instant in-browser results). */
+  sublabel?: string;
 }
 
 type FallbackSuggestionRow = {

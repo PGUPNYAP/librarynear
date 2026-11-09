@@ -1,5 +1,5 @@
 import Image from "next/image";
-import { notFound } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 import { PortableText } from "@portabletext/react";
 import { Suspense } from "react";
 import { HomeSearchShell } from "@/components/home-search-shell";
@@ -9,9 +9,21 @@ import { getSiteUrl } from "@/lib/site-url";
 
 export const revalidate = 60; // Revalidate every minute
 
-async function getPost(slug: string) {
-  const query = `*[_type == "post" && slug.current == $slug][0] {
+function cleanSlug(slug: string) {
+  try {
+    return decodeURIComponent(slug).trim();
+  } catch {
+    return slug.trim();
+  }
+}
+
+async function getPost(rawSlug: string) {
+  const slug = cleanSlug(rawSlug);
+  // Some CMS slugs were saved with stray whitespace; match those too so the
+  // clean URL works.
+  const query = `*[_type == "post" && (slug.current == $slug || slug.current == " " + $slug || slug.current == $slug + " ")][0] {
     title,
+    _updatedAt,
     mainImage,
     publishedAt,
     seoDescription,
@@ -33,14 +45,14 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   const imageUrl = post.mainImage ? urlForImage(post.mainImage)?.width(1200).height(630).url() : `${siteUrl}/og-default.png`;
 
   return {
-    title: `${post.title} — LibraryNear`,
+    title: post.title,
     description: post.seoDescription || `Read ${post.title} on LibraryNear.`,
     openGraph: {
       title: post.title,
       description: post.seoDescription,
       type: "article",
       publishedTime: post.publishedAt,
-      url: `${siteUrl}/blog/${slug}`,
+      url: `${siteUrl}/blog/${cleanSlug(slug)}`,
       images: [
         {
           url: imageUrl,
@@ -57,7 +69,7 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
       images: [imageUrl],
     },
     alternates: {
-      canonical: `${siteUrl}/blog/${slug}`,
+      canonical: `${siteUrl}/blog/${cleanSlug(slug)}`,
     },
   };
 }
@@ -117,6 +129,10 @@ const portableTextComponents = {
 
 export default async function BlogPostPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
+  const canonicalSlug = cleanSlug(slug);
+  if (canonicalSlug !== slug && encodeURIComponent(canonicalSlug) !== slug) {
+    permanentRedirect(`/blog/${encodeURIComponent(canonicalSlug)}`);
+  }
   const post = await getPost(slug);
 
   if (!post) {
@@ -124,6 +140,7 @@ export default async function BlogPostPage({ params }: { params: Promise<{ slug:
   }
 
   const siteUrl = getSiteUrl();
+  const postUrl = `${siteUrl}/blog/${canonicalSlug}`;
   const readTime = Math.max(1, post.readingTime || 3);
   
   const jsonLd = {
@@ -132,33 +149,39 @@ export default async function BlogPostPage({ params }: { params: Promise<{ slug:
     headline: post.title,
     image: post.mainImage ? [urlForImage(post.mainImage)?.url()] : [],
     datePublished: post.publishedAt,
-    dateModified: post.publishedAt,
+    dateModified: post._updatedAt || post.publishedAt,
+    mainEntityOfPage: { "@type": "WebPage", "@id": postUrl },
+    url: postUrl,
+    inLanguage: "en-IN",
     author: [{
       "@type": "Organization",
-      name: "LibraryNear Team",
-      url: siteUrl,
+      "@id": `${siteUrl}/#organization`,
+      name: "LibraryNear Editorial Team",
+      url: `${siteUrl}/about`,
     }],
-    publisher: {
-      "@type": "Organization",
-      name: "LibraryNear",
-      logo: {
-        "@type": "ImageObject",
-        url: `${siteUrl}/logo-icon.webp`,
-      },
-    },
+    publisher: { "@id": `${siteUrl}/#organization` },
     description: post.seoDescription,
+  };
+  const breadcrumbJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: siteUrl },
+      { "@type": "ListItem", position: 2, name: "Blog", item: `${siteUrl}/blog` },
+      { "@type": "ListItem", position: 3, name: post.title, item: postUrl },
+    ],
   };
 
   return (
     <div className="flex flex-col min-h-screen bg-white">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        dangerouslySetInnerHTML={{ __html: JSON.stringify([jsonLd, breadcrumbJsonLd]).replace(/</g, "\\u003c") }}
       />
       
 
 
-      <main className="w-full flex justify-center pb-20">
+      <div className="w-full flex justify-center pb-20">
         <article className="w-full max-w-[680px] px-5 md:px-0 mt-10 md:mt-16">
           <header className="mb-10">
             <h1 className="text-[32px] md:text-[42px] leading-[40px] md:leading-[52px] font-bold tracking-tight text-gray-900 mb-8 font-sans">
@@ -215,7 +238,7 @@ export default async function BlogPostPage({ params }: { params: Promise<{ slug:
           <div className="w-full h-[1px] bg-gray-100 mt-16 mb-8" />
           
         </article>
-      </main>
+      </div>
       
       <div className="w-full border-t border-border/40 bg-slate-50/30">
         <div className="container mx-auto px-6 py-12 md:px-10 flex flex-col items-center text-center">

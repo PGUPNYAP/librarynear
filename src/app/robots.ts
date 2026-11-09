@@ -1,6 +1,17 @@
 import type { MetadataRoute } from "next";
 import { getSiteUrl } from "@/lib/site-url";
 
+const PRIVATE_PATHS = [
+  "/admin",
+  "/api/",
+  "/sales",
+  "/studio",
+  "/saved",
+  "/profile",
+  "/staff-access",
+  "/auth/",
+];
+
 export default function robots(): MetadataRoute.Robots {
   const siteUrl = getSiteUrl();
 
@@ -9,9 +20,10 @@ export default function robots(): MetadataRoute.Robots {
       {
         userAgent: "*",
         allow: "/",
-        disallow: ["/admin", "/api/"],
+        disallow: PRIVATE_PATHS,
       },
     ],
     sitemap: `${siteUrl}/sitemap.xml`,
+    host: siteUrl,
   };
 }

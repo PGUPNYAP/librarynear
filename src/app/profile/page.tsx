@@ -116,9 +116,6 @@ export default async function ProfilePage() {
             <div>
               <h1 className="text-3xl font-bold tracking-tight text-black">{displayName}</h1>
               <p className="mt-1 text-sm text-muted-foreground">{profile?.email ?? user.email}</p>
-              <p className="mt-2 text-xs font-medium uppercase tracking-[0.18em] text-primary">
-                Google account connected
-              </p>
             </div>
           </div>
 

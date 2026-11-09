@@ -50,14 +50,15 @@ export async function runLibraryCardQuery(
   }
 
   if (!isMissingCoverImageColumn(primaryResult.error.message)) {
-    console.error("Failed to fetch library cards:", primaryResult.error.message);
-    return [];
+    // Throw instead of returning []: an empty result would make pages render
+    // "no libraries" or a 404, and ISR would cache that. Throwing keeps the
+    // last good cached page in production and shows the error page in dev.
+    throw new Error(`Failed to fetch library cards: ${primaryResult.error.message}`);
   }
 
   const fallbackResult = (await queryFactory(LIBRARY_CARD_SELECT_FALLBACK)) as LibraryCardQueryResult;
   if (fallbackResult.error) {
-    console.error("Failed to fetch fallback library cards:", fallbackResult.error.message);
-    return [];
+    throw new Error(`Failed to fetch library cards: ${fallbackResult.error.message}`);
   }
 
   return (fallbackResult.data ?? []).map((row) => ({

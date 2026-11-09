@@ -62,6 +62,8 @@ export function Footer() {
                 <li><Link href="/profile" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Profile</Link></li>
                 <li><Link href="/for-owners" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">List Your Library</Link></li>
                 <li><Link href="/saved" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Favourites</Link></li>
+                <li><Link href="/cities" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Libraries by city</Link></li>
+                <li><Link href="/editorial-policy" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Editorial policy</Link></li>
                 <li><Link href="/privacy" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Privacy Policy</Link></li>
                 <li><Link href="/contact" className="text-[13px] text-muted-foreground hover:text-primary transition-colors">Contact</Link></li>
               </ul>
@@ -100,6 +102,13 @@ export function Footer() {
           <div className="flex flex-col md:flex-row items-center justify-between border-t border-border pt-6">
             <p className="text-[12px] text-muted-foreground text-center md:text-left mb-4 md:mb-0 max-w-lg">
               ©2026 LibraryNear. Explore study spaces, save your shortlist, and connect students with trusted libraries.
+              <span className="mt-1 block text-[11px]">
+                Place and station data ©{" "}
+                <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer" className="underline">
+                  OpenStreetMap contributors
+                </a>
+                .
+              </span>
             </p>
             <div className="flex items-center gap-3">
               {socialLinks.map(({ label, href }) =>

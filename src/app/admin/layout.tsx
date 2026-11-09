@@ -1,6 +1,8 @@
 import { logout } from "./actions";
 import Link from "next/link";
-import { Search, Users, Building2, LogOut, BarChart3, ClipboardCheck, UserRoundCog } from "lucide-react";
+import { Suspense } from "react";
+import { FlashBanner } from "@/components/flash-banner";
+import { Search, Users, Building2, LogOut, BarChart3, ClipboardCheck, UserRoundCog, MapPinned } from "lucide-react";
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -30,6 +32,13 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             Libraries Editor
           </Link>
           <Link
+            href="/sales/quick-fill"
+            className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-muted transition-colors text-black"
+          >
+            <Building2 className="w-4 h-4" />
+            Quick fill
+          </Link>
+          <Link
             href="/admin/owner-submissions"
             className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-muted transition-colors text-black"
           >
@@ -42,6 +51,20 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           >
             <BarChart3 className="w-4 h-4" />
             Analytics
+          </Link>
+          <Link
+            href="/admin/assignments"
+            className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-muted transition-colors text-black"
+          >
+            <MapPinned className="w-4 h-4" />
+            Assignments
+          </Link>
+          <Link
+            href="/admin/search"
+            className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium hover:bg-muted transition-colors text-black"
+          >
+            <Search className="w-4 h-4" />
+            Search learning
           </Link>
           <Link
             href="/admin/team"
@@ -64,6 +87,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
       {/* Main Content */}
       <main className="flex-1 overflow-auto">
+        <Suspense fallback={null}>
+          <FlashBanner />
+        </Suspense>
         {children}
       </main>
     </div>

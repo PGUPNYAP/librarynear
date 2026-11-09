@@ -13,7 +13,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 const mockSupabaseServer = {
-  from: vi.fn(() => ({
+  from: vi.fn((_table: string): any => ({
     update: vi.fn(() => ({ eq: vi.fn(() => ({ error: null })) })),
     upsert: vi.fn(() => ({ error: null })),
     insert: vi.fn(() => ({ error: null })),
@@ -121,11 +121,19 @@ describe("Admin Server Actions - Authorization", () => {
   });
 
   describe("setLibraryVerificationStatus", () => {
-    it("rejects unauthenticated users with redirect", async () => {
+    it("refuses unauthenticated users without changing anything", async () => {
       mockCurrentViewer = { user: null, profile: null };
 
       const { setLibraryVerificationStatus } = await import("@/app/admin/libraries-actions");
-      await expect(setLibraryVerificationStatus("lib-1", "verified")).rejects.toThrow("REDIRECT:");
+      // Called from a client component, so it returns an error instead of redirecting.
+      await expect(setLibraryVerificationStatus("lib-1", "verified")).resolves.toMatchObject({ ok: false });
+    });
+
+    it("rejects unknown status values", async () => {
+      const { setLibraryVerificationStatus } = await import("@/app/admin/libraries-actions");
+      await expect(
+        setLibraryVerificationStatus("lib-1", "hacked" as unknown as "verified"),
+      ).resolves.toMatchObject({ ok: false });
     });
   });
 

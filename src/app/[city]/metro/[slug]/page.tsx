@@ -9,6 +9,7 @@ import { getSiteUrl } from "@/lib/site-url";
 import { DeferredSaveButton } from "@/components/deferred-save-button";
 import { IntentLink } from "@/components/intent-link";
 import type { Metadata } from "next";
+import { slugToIlikePattern, slugToLabel } from "@/lib/places";
 
 interface PageProps {
   params: Promise<{ city: string; slug: string }>;
@@ -28,7 +29,7 @@ async function getLibrariesByMetro(city: string, metro: string): Promise<Library
       .from("library_branches")
       .select(selectClause)
       .eq("is_active", true)
-      .ilike("city", city)
+      .ilike("city", slugToIlikePattern(city))
       .ilike("nearest_metro", metro)
       .order("nearest_metro_distance_km", { ascending: true, nullsFirst: false }),
   );
@@ -38,7 +39,7 @@ const getCachedLibrariesByMetro = unstable_cache(
   async (city: string, metro: string) => getLibrariesByMetro(city, metro),
   ["libraries-by-metro"],
   {
-    revalidate: 120,
+    revalidate: 3600,
     tags: ["library-cards"],
   },
 );
@@ -46,41 +47,17 @@ const getCachedLibrariesByMetro = unstable_cache(
 const getMetroLibraries =
   process.env.NODE_ENV === "development" ? getLibrariesByMetro : getCachedLibrariesByMetro;
 
+// Rendered on first request, then cached (ISR).
 export async function generateStaticParams() {
-  if (process.env.NODE_ENV === "development") {
-    return [];
-  }
-
-  const { data } = await supabaseServer
-    .from("library_branches")
-    .select("city, nearest_metro")
-    .eq("is_active", true)
-    .not("nearest_metro", "is", null);
-    
-  const rows = (data as Array<{ city: string; nearest_metro: string | null }>) ?? [];
-
-  const seen = new Set<string>();
-  const params: { city: string; slug: string }[] = [];
-
-  for (const row of rows) {
-    if (!row.nearest_metro) continue;
-    const key = `${row.city.toLowerCase()}-${row.nearest_metro}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    params.push({
-      city: row.city.toLowerCase(),
-      slug: row.nearest_metro.toLowerCase().replace(/\s+/g, "-"),
-    });
-  }
-  return params;
+  return [];
 }
 
-export const revalidate = 120;
+export const revalidate = 3600;
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { city, slug } = await params;
   const metro = slugToMetroName(slug);
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/metro/${slug}`;
   
@@ -117,7 +94,7 @@ export default async function MetroPage({ params }: PageProps) {
   if (libraries.length === 0) notFound();
   logPerf("metro", [librariesMeasurement.metric], `city="${city}" metro="${metro}" count=${libraries.length}`);
 
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
 
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/metro/${slug}`;

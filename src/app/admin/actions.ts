@@ -4,13 +4,13 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
-import { checkRateLimit, getClientIp, RATE_LIMITS } from "@/lib/rate-limit";
+import { getClientIp, rateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 
 const STAFF_LOGIN_PATH = "/staff-access";
 
 export async function login(formData: FormData) {
   const ip = getClientIp(await headers());
-  const rateCheck = checkRateLimit(ip, RATE_LIMITS.staffLogin);
+  const rateCheck = await rateLimit(ip, RATE_LIMITS.staffLogin);
   if (!rateCheck.success) {
     redirect(`${STAFF_LOGIN_PATH}?error=` + encodeURIComponent("Too many login attempts. Please try again later."));
   }

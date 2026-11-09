@@ -1,9 +1,71 @@
 "use client";
 
-import { Search, MapPin, Building2, TrainFront, X, Loader2 } from "lucide-react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useRef, useState, useEffect, useCallback, useMemo } from "react";
+import { Search, MapPin, Building2, TrainFront, X, Loader2, Clock, Sparkles, TrendingUp, Landmark, Hash, SearchCheck } from "lucide-react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useRef, useState, useEffect, useCallback, useMemo, useSyncExternalStore } from "react";
 import type { Suggestion } from "@/app/api/suggestions/route";
+import { CityPicker, CITY_COOKIE } from "@/components/city-picker";
+import { citySlug, DEFAULT_CITY_SLUG, slugToLabel } from "@/lib/places";
+import { getAmenityByLabel, getAmenityBySlug } from "@/lib/amenities";
+import {
+  getLoadedIndex,
+  getLoadedPlaces,
+  highlightParts,
+  loadPlacesIndex,
+  loadSearchIndex,
+  popularPlaces,
+  searchLocally,
+  searchOtherCities,
+  parseQuery,
+  type IntentChip,
+} from "@/lib/client-search";
+import { getApproxLocation, getCachedLocation, rememberPreciseLocation, type UserLocation } from "@/lib/user-location";
+import { addRecentSearch, clearRecentSearches, readRecentSearches, type RecentSearch } from "@/lib/recent-searches";
+import { logSearchEvent } from "@/lib/search-telemetry";
+
+// First path segments that are not cities.
+const NON_CITY_SEGMENTS = new Set([
+  "", "blog", "about", "contact", "for-owners", "directory", "guides", "privacy", "profile", "saved",
+  "admin", "sales", "studio", "staff-access", "auth", "compare", "cities", "editorial-policy", "api",
+]);
+
+const subscribeNever = () => () => {};
+
+const LOCATION_PROMPT_KEY = "ln_location_prompt_done";
+
+/** Offer the location prompt once, only if the browser hasn't asked yet and we have no precise fix. */
+async function shouldOfferLocation(): Promise<boolean> {
+  try {
+    if (localStorage.getItem(LOCATION_PROMPT_KEY)) return false;
+    if (!("geolocation" in navigator)) return false;
+    if (getCachedLocation()?.accuracy === "precise") return false;
+    const status = await navigator.permissions?.query({ name: "geolocation" as PermissionName });
+    return !status || status.state === "prompt";
+  } catch {
+    return false;
+  }
+}
+
+function readCityCookie(): string | null {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie.match(new RegExp(`(?:^|; )${CITY_COOKIE}=([^;]+)`));
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+function useActiveCity(explicitCity?: string) {
+  const pathname = usePathname();
+  const segment = (pathname?.split("/")[1] ?? "").toLowerCase();
+  const fromPath = segment && !NON_CITY_SEGMENTS.has(segment) ? segment : null;
+  const fromCookie = useSyncExternalStore(subscribeNever, readCityCookie, () => null);
+  // The homepage lists Delhi libraries, so its picker must say Delhi too.
+  if (!explicitCity && (pathname === "/" || pathname === "")) return DEFAULT_CITY_SLUG;
+  return explicitCity ?? fromPath ?? fromCookie ?? DEFAULT_CITY_SLUG;
+}
 
 interface SearchBarProps {
   city?: string;
@@ -43,6 +105,10 @@ const TYPE_ICON = {
   locality: MapPin,
   metro: TrainFront,
   nearby: NearbyGlyph,
+  nearme: NearbyGlyph,
+  lookup: SearchCheck,
+  place: Landmark,
+  pincode: Hash,
 };
 
 const GROUP_LABEL = {
@@ -50,8 +116,15 @@ const GROUP_LABEL = {
   locality: "Localities",
   metro: "Metro Stations",
   nearby: "Nearby",
+  nearme: "",
+  lookup: "",
+  place: "Places",
+  pincode: "PIN codes",
 };
-const ORDERED_TYPES = ["nearby", "library", "locality", "metro"] as const;
+// "near X" queries lead with places; plain queries lead with localities.
+const NEAR_ORDER = ["nearme", "nearby", "lookup", "place", "pincode", "locality", "metro", "library"] as const;
+const DEFAULT_ORDER = ["nearme", "nearby", "lookup", "pincode", "locality", "metro", "place", "library"] as const;
+type OrderedType = (typeof NEAR_ORDER)[number];
 
 const MIN_QUERY_LENGTH = 2;
 const DEBOUNCE_MS = 220;
@@ -66,7 +139,8 @@ function groupSuggestions(suggestions: Suggestion[]) {
   return groups;
 }
 
-export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
+export function SearchBar({ city: cityProp, compact = false }: SearchBarProps) {
+  const city = useActiveCity(cityProp);
   const router = useRouter();
   const currentParams = useSearchParams();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -78,6 +152,9 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
   const [nearbyLoading, setNearbyLoading] = useState(false);
   const [nearbyPhase, setNearbyPhase] = useState<NearbyPhase>("idle");
   const [open, setOpen] = useState(false);
+  // While typing, the input expands over the city pill.
+  const [focused, setFocused] = useState(false);
+  const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [nearbyMode, setNearbyMode] = useState(currentParams.get("nearby") === "1");
@@ -91,6 +168,71 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
   const requestIdRef = useRef(0);
   const cacheRef = useRef<Map<string, Suggestion[]>>(new Map());
   const prefetchedRoutesRef = useRef<Set<string>>(new Set());
+  const [chip, setChip] = useState<IntentChip | null>(null);
+  const [userLocation, setUserLocation] = useState<UserLocation | null>(null);
+  const [recents, setRecents] = useState<RecentSearch[]>([]);
+  const [indexReady, setIndexReady] = useState(false);
+  // One-time, non-blocking "show nearest first?" offer inside the search panel.
+  const [locationPrompt, setLocationPrompt] = useState(false);
+  const [locating, setLocating] = useState(false);
+
+  // Instant search: fetch this city's small index once the page is idle.
+  useEffect(() => {
+    if (!city) return;
+    const idle = (window as Window & { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
+    const run = () =>
+      void loadSearchIndex(city).then((ready) => {
+        if (ready) setIndexReady(true);
+      });
+    if (idle) {
+      const handle = idle(run);
+      return () => (window as Window & { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback?.(handle);
+    }
+    const timer = window.setTimeout(run, 1200);
+    return () => window.clearTimeout(timer);
+  }, [city]);
+
+  /** Answer from the in-browser index. Returns false when it can't (not loaded / no hits). */
+  const suggestLocally = useCallback(
+    (q: string) => {
+      const index = getLoadedIndex(city);
+      const trimmed = q.trim();
+      if (!index || trimmed.length === 0) return false;
+      const location = userLocation ?? getCachedLocation();
+      const { suggestions: local, chip: nextChip } = searchLocally(index, trimmed, {
+        location,
+        cityLabel: slugToLabel(city),
+      });
+      let results = local as Suggestion[];
+      // Strong matches in other cities too (e.g. "Andheri" while browsing Delhi).
+      if (trimmed.length >= 3) {
+        const places = getLoadedPlaces();
+        if (places) {
+          const others = searchOtherCities(places, trimmed, city, results.length < 3 ? 3 : 2) as Suggestion[];
+          results = [...results, ...others];
+        } else {
+          void loadPlacesIndex().then(() => {
+            if (inputRef.current?.value === q) suggestLocallyRef.current?.(q);
+          });
+        }
+      }
+      if (results.length === 0 && !nextChip) return false;
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      abortRef.current?.abort();
+      setLoading(false);
+      setSuggestions(results);
+      setChip(nextChip);
+      setOpen(true);
+      setHighlightedIndex(-1);
+      setLocationError(null);
+      return true;
+    },
+    [city, userLocation],
+  );
+  const suggestLocallyRef = useRef<((q: string) => boolean) | null>(null);
+  useEffect(() => {
+    suggestLocallyRef.current = suggestLocally;
+  }, [suggestLocally]);
 
   const fetchSuggestions = useCallback(async (q: string) => {
     const normalizedQuery = q.trim();
@@ -262,6 +404,17 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
   }, [city, currentParams, router]);
 
   const getSuggestionHref = useCallback((suggestion: Suggestion) => {
+    if (suggestion.type === "place" && typeof suggestion.lat === "number" && typeof suggestion.lng === "number") {
+      const params = new URLSearchParams({
+        nearby: "1",
+        lat: suggestion.lat.toFixed(5),
+        lng: suggestion.lng.toFixed(5),
+        near: suggestion.label.replace(/^Libraries near /, ""),
+      });
+      return `/${citySlug(suggestion.city)}/libraries?${params.toString()}`;
+    }
+    if (suggestion.type === "pincode") return `/${citySlug(suggestion.city)}/pincode/${suggestion.slug}`;
+    if (suggestion.type === "nearme" || suggestion.type === "lookup") return "";
     if (suggestion.type === "library" || suggestion.type === "nearby") {
       return `/${suggestion.city}/library/${suggestion.slug}`;
     }
@@ -295,12 +448,42 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
     setHighlightedIndex(-1);
     setQuery(val);
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    // Instant path: no debounce, no network.
+    if (suggestLocally(val)) return;
+    if (!val.trim()) {
+      setSuggestions([]);
+      setChip(null);
+      setOpen(false);
+      return;
+    }
+    setChip(null);
     debounceRef.current = setTimeout(() => fetchSuggestions(val), DEBOUNCE_MS);
+    // If the index finishes loading while the user waits, answer from it.
+    void loadSearchIndex(city).then(() => {
+      if (inputRef.current?.value === val) suggestLocally(val);
+    });
   }
 
   function navigate(q: string) {
     setOpen(false);
     setHighlightedIndex(-1);
+
+    if (q && !nearbyMode) {
+      const parsed = parseQuery(q);
+      if (parsed.nearMe && parsed.tokens.length === 0) {
+        handleNearMeClick();
+        return;
+      }
+      if (parsed.nearText) {
+        const best = flatSuggestions.find((s) => s.type === "place");
+        if (best) {
+          handleSuggestionClick(best, 0);
+          return;
+        }
+        void resolvePlaceAndGo(parsed.nearText);
+        return;
+      }
+    }
 
     if (q) {
       const normalizedQ = q.trim().toLowerCase();
@@ -312,14 +495,24 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
       );
       
       if (exactMatch) {
-        router.push(`/${exactMatch.city}/${exactMatch.type}/${exactMatch.slug}`);
+        router.push(`/${citySlug(exactMatch.city)}/${exactMatch.type}/${exactMatch.slug}`);
+        return;
+      }
+    }
+
+    // "ac", "wifi", "libraries with locker" -> amenity filter instead of text search.
+    if (q && !nearbyMode) {
+      const cleaned = q.trim().toLowerCase().replace(/^(libraries|library)\s+(with|having)\s+/, "");
+      const amenity = getAmenityByLabel(cleaned) ?? getAmenityBySlug(cleaned.replace(/\s+/g, "-"));
+      if (amenity) {
+        router.push(`/${city}/libraries?amenities=${encodeURIComponent(amenity.label)}`);
         return;
       }
     }
 
     const params = new URLSearchParams();
     if (q) params.set("q", q);
-    
+
     // We intentionally DO NOT preserve the `locality` parameter here.
     // When a user initiates a new text search from the top bar, it acts as a fresh 
     // global search. If they wanted a specific locality, they would select it 
@@ -331,19 +524,106 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
       params.set("lng", nearbyCoords.lng.toFixed(4));
       params.set("q", "Nearby");
     }
+    // Instant results (rendered in the browser) when the city index is ready;
+    // the server-rendered listing otherwise (and for "near me").
+    if (q && !(nearbyMode && nearbyCoords) && getLoadedIndex(city)) {
+      router.push(`/${city}/search?q=${encodeURIComponent(q.trim())}`);
+      return;
+    }
     router.push(`/${city}/libraries?${params.toString()}`);
   }
 
   function handleSearch(e: React.FormEvent) {
     e.preventDefault();
+    if (query.trim() && !nearbyMode) {
+      logSearchEvent({ query, city, result_count: suggestions.length, source: "submit" });
+    }
     navigate(query);
   }
 
-  function handleSuggestionClick(s: Suggestion) {
+  function finishLocationPrompt() {
+    try {
+      localStorage.setItem(LOCATION_PROMPT_KEY, "1");
+    } catch {
+      // storage blocked
+    }
+    setLocationPrompt(false);
+  }
+
+  function allowPreciseLocation() {
+    if (!navigator.geolocation) return finishLocationPrompt();
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        rememberPreciseLocation(position.coords.latitude, position.coords.longitude);
+        setUserLocation({ lat: position.coords.latitude, lng: position.coords.longitude, accuracy: "precise" });
+        setLocating(false);
+        finishLocationPrompt();
+      },
+      () => {
+        setLocating(false);
+        finishLocationPrompt();
+      },
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 10 * 60 * 1000 },
+    );
+  }
+
+  /** Ask the server (our data, cache, then Google) where a place is, then open libraries near it. */
+  async function resolvePlaceAndGo(placeText: string) {
+    setLoading(true);
+    setLocationError(null);
+    try {
+      const response = await fetch(`/api/places/resolve?city=${encodeURIComponent(city)}&q=${encodeURIComponent(placeText)}`);
+      const place = (await response.json()) as { label?: string; lat?: number; lng?: number; error?: string };
+      if (!response.ok || typeof place.lat !== "number" || typeof place.lng !== "number") {
+        setLocationError(place.error === "Place not found in this city" ? `Couldn't find “${placeText}” in ${slugToLabel(city)}.` : `Couldn't find “${placeText}”.`);
+        return;
+      }
+      const href = getSuggestionHref({ type: "place", label: `Libraries near ${place.label}`, slug: "", city, lat: place.lat, lng: place.lng } as Suggestion);
+      setRecents(addRecentSearch({ label: `Libraries near ${place.label}`, href, type: "place", city }));
+      setOpen(false);
+      router.push(href);
+    } catch {
+      setLocationError("Couldn't look that place up. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleSuggestionClick(s: Suggestion, position = -1) {
+    if (s.type === "nearme") {
+      handleNearMeClick();
+      return;
+    }
+    if (s.type === "lookup") {
+      logSearchEvent({ query, city, result_count: 0, source: "lookup" });
+      void resolvePlaceAndGo(s.query ?? query);
+      return;
+    }
     const href = getSuggestionHref(s);
+    if (s.type !== "nearby") {
+      logSearchEvent({
+        query,
+        city,
+        result_count: suggestions.length,
+        clicked_slug: s.slug,
+        clicked_type: s.type,
+        clicked_label: s.label,
+        position,
+        source: getLoadedIndex(city) ? "local" : "server",
+      });
+      setRecents(addRecentSearch({ label: s.label, href, type: s.type, city: citySlug(s.city) }));
+    }
     router.push(href);
     setOpen(false);
     setHighlightedIndex(-1);
+  }
+
+  function handleChipClick(target: IntentChip) {
+    logSearchEvent({ query, city, result_count: suggestions.length, source: "chip" });
+    setRecents(addRecentSearch({ label: target.label, href: target.href, type: "filter", city }));
+    router.push(target.href);
+    setOpen(false);
   }
 
   function clearInput() {
@@ -379,6 +659,8 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
           lat: Number(position.coords.latitude.toFixed(4)),
           lng: Number(position.coords.longitude.toFixed(4)),
         };
+        rememberPreciseLocation(coords.lat, coords.lng);
+        setUserLocation({ lat: coords.lat, lng: coords.lng, accuracy: "precise" });
         setNearbyMode(true);
         setNearbyCoords(coords);
         setQuery("Nearby");
@@ -386,10 +668,24 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
         navigateToNearbyResults(coords);
       },
       (error) => {
+        // Fall back to the approximate (IP-based) location so "near me" still works.
+        void getApproxLocation().then((approx) => {
+          if (approx) {
+            setNearbyLoading(false);
+            setNearbyPhase("idle");
+            const params = new URLSearchParams({
+              nearby: "1",
+              lat: approx.lat.toFixed(4),
+              lng: approx.lng.toFixed(4),
+              near: "your area (approximate)",
+            });
+            router.push(`/${city}/libraries?${params.toString()}`);
+          }
+        });
         const message =
           error.code === error.PERMISSION_DENIED
-            ? "Location permission was denied."
-            : "Unable to get your current location.";
+            ? "Location permission was denied. Showing libraries near your approximate area instead."
+            : "Unable to get your exact location. Showing your approximate area instead.";
         setLocationError(message);
         setSuggestions([]);
         setOpen(false);
@@ -445,9 +741,13 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
   }, []);
 
   const grouped = groupSuggestions(suggestions);
+  const orderedTypes: readonly OrderedType[] = useMemo(
+    () => (parseQuery(query).nearText ? NEAR_ORDER : DEFAULT_ORDER),
+    [query],
+  );
   const flatSuggestions = useMemo(
-    () => ORDERED_TYPES.flatMap((type) => grouped[type] ?? []),
-    [grouped],
+    () => orderedTypes.flatMap((type) => grouped[type] ?? []),
+    [grouped, orderedTypes],
   );
 
   useEffect(() => {
@@ -473,6 +773,13 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
     prefetchSuggestionRoute(flatSuggestions[highlightedIndex]);
   }, [flatSuggestions, highlightedIndex, prefetchSuggestionRoute]);
 
+  const showEmptyPanel = focused && !query.trim() && !nearbyMode;
+  const popular = useMemo(() => {
+    void indexReady;
+    const index = getLoadedIndex(city);
+    return index ? popularPlaces(index, userLocation, 6) : [];
+  }, [city, userLocation, indexReady]);
+
   function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (!open || flatSuggestions.length === 0) {
       if (e.key === "ArrowDown" && suggestions.length > 0) {
@@ -497,7 +804,7 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
 
     if (e.key === "Enter" && highlightedIndex >= 0) {
       e.preventDefault();
-      handleSuggestionClick(flatSuggestions[highlightedIndex]);
+      handleSuggestionClick(flatSuggestions[highlightedIndex], highlightedIndex);
       return;
     }
 
@@ -515,22 +822,33 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
         className={`flex items-center w-full bg-white rounded-full border border-border transition-shadow ${
           compact
             ? "shadow-none pl-1.5 md:pl-2 pr-1.5 py-1.5"
-            : "shadow-[0_3px_15px_-2px_rgba(0,0,0,0.12)] hover:shadow-[0_4px_22px_-2px_rgba(0,0,0,0.16)] pl-1.5 md:pl-2 pr-1.5 md:pr-2 py-1.5 md:py-2"
+            : "shadow-[0_3px_15px_-2px_rgba(0,0,0,0.12)] hover:shadow-[0_4px_22px_-2px_rgba(0,0,0,0.16)] pl-1.5 md:pl-2 pr-1.5 md:pr-2 py-1.5 md:py-2 gap-0.5 md:gap-0"
         }`}
       >
         <button
           type="submit"
-          className={`${compact ? "h-8 w-8 md:h-10 md:w-10" : "h-10 w-10 md:h-12 md:w-12"} rounded-full bg-primary text-white flex items-center justify-center shrink-0 hover:bg-primary/90 transition-colors shadow-sm mr-2 md:mr-3`}
+          className={`${compact ? "h-8 w-8 md:h-10 md:w-10" : "h-9 w-9 md:h-12 md:w-12"} rounded-full bg-primary text-white flex items-center justify-center shrink-0 hover:bg-primary/90 transition-colors shadow-sm mr-1 md:mr-3`}
           aria-label="Search"
         >
           {loading ? (
-            <Loader2 className="h-4 w-4 md:h-5 md:w-5 animate-spin" strokeWidth={3} />
+            <Loader2 className="h-[15px] w-[15px] md:h-5 md:w-5 animate-spin" strokeWidth={3} />
           ) : (
-            <Search className="h-4 w-4 md:h-5 md:w-5" strokeWidth={3} />
+            <Search className="h-[15px] w-[15px] md:h-5 md:w-5" strokeWidth={3} />
           )}
         </button>
+        <div
+          aria-hidden={focused}
+          className={`flex shrink-0 items-center transition-[max-width,opacity,transform] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+            focused
+              ? "pointer-events-none max-w-0 -translate-x-2 overflow-hidden opacity-0"
+              : "max-w-[200px] translate-x-0 opacity-100"
+          }`}
+        >
+          <CityPicker citySlug={city} cityLabel={slugToLabel(city)} compact={compact} />
+          <span aria-hidden="true" className="mx-0.5 h-5 w-px shrink-0 bg-border md:mx-2 md:h-6" />
+        </div>
         <div className={`flex-1 flex flex-col justify-center min-w-0 ${compact ? "" : "md:py-1"}`}>
-          {!compact ? <span className="hidden md:block text-[10px] font-bold tracking-wider text-black md:text-[11px]">Where</span> : null}
+          {!compact ? <span className="hidden md:block text-[10px] font-bold tracking-wider text-black md:text-[11px]">Where in {slugToLabel(city)}</span> : null}
           <div className={`${compact ? "min-h-8" : "min-h-10 md:min-h-8"} flex items-center gap-2`}>
             <input
               ref={inputRef}
@@ -538,9 +856,33 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
               value={query}
               onChange={handleInputChange}
               onKeyDown={handleInputKeyDown}
-              onFocus={() => suggestions.length > 0 && setOpen(true)}
-              placeholder={compact ? "Search libraries near you" : "Locality, metro station, or library name..."}
-              className={`flex-1 bg-transparent outline-none placeholder:text-muted-foreground truncate min-w-0 ${
+              onFocus={() => {
+                if (blurTimerRef.current) clearTimeout(blurTimerRef.current);
+                setFocused(true);
+                setRecents(readRecentSearches());
+                void shouldOfferLocation().then(setLocationPrompt);
+                void loadSearchIndex(city).then((ready) => {
+                  if (ready) setIndexReady(true);
+                });
+                // Never prompts: precise fix from an earlier "Near me", else IP-based.
+                void getApproxLocation().then((location) => {
+                  if (location) setUserLocation(location);
+                });
+                if (suggestions.length > 0 || chip) setOpen(true);
+              }}
+              onBlur={() => {
+                // Small delay so a tap on a suggestion still registers.
+                blurTimerRef.current = setTimeout(() => setFocused(false), 150);
+              }}
+              placeholder={
+                focused
+                  ? `Search in ${slugToLabel(city)}…`
+                  : compact
+                    ? "Search libraries"
+                    : "Search area, metro or library"
+              }
+              aria-label={`Search libraries in ${slugToLabel(city)}`}
+              className={`flex-1 bg-transparent pl-1 outline-none placeholder:text-muted-foreground truncate min-w-0 md:pl-0 ${
                 compact ? "text-[13px] font-medium" : "text-[13px] md:text-sm"
               }`}
               autoComplete="off"
@@ -557,57 +899,193 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
             )}
           </div>
         </div>
-        <div className="ml-2 md:ml-3 flex shrink-0 items-center gap-2 self-stretch">
+        <div className="ml-1 flex shrink-0 items-center md:ml-3">
           <button
             type="button"
             onClick={handleNearMeClick}
             disabled={nearbyLoading}
-            className={`relative overflow-hidden flex flex-col items-center justify-center gap-0.5 rounded-full border transition-all ${
-              compact ? "h-8 w-14 md:w-auto md:px-2.5 md:flex-row md:gap-1.5" : "h-10 w-16 md:h-12 md:w-auto md:px-4 md:flex-row md:gap-1.5"
-            } ${nearbyMode
-                ? "border-primary/30 text-black shadow-sm"
-                : "border-border/80 text-black hover:border-primary/30 shadow-sm"
-              } ${nearbyLoading ? "cursor-wait opacity-90" : ""}`}
             aria-label="Find libraries near me"
+            aria-pressed={nearbyMode}
             title="Find libraries near me"
+            className={`group relative flex items-center justify-center gap-1.5 overflow-hidden rounded-full border font-semibold transition-all duration-200 active:scale-95 ${
+              compact ? "h-8 w-8 md:h-9 md:w-auto md:px-3 md:text-[13px]" : "h-9 w-9 md:h-11 md:w-auto md:px-4 md:text-sm"
+            } ${
+              nearbyMode
+                ? "border-primary bg-primary text-white shadow-md shadow-primary/30"
+                : "border-primary/15 bg-gradient-to-br from-primary/[0.08] via-white to-primary/[0.12] text-primary hover:border-primary/35 hover:shadow-sm hover:shadow-primary/15"
+            } ${nearbyLoading ? "cursor-wait" : ""}`}
           >
-            <div className={`absolute inset-0 bg-gradient-to-br ${nearbyMode ? "from-blue-100 via-indigo-200 to-blue-100" : "from-slate-100 via-slate-300 to-slate-100"} animate-liquid z-0`} />
-            <div className="relative z-10 flex flex-col md:flex-row items-center justify-center gap-0.5 md:gap-1.5">
+            {nearbyLoading ? (
+              <span aria-hidden="true" className="absolute inset-0 animate-pulse bg-primary/10" />
+            ) : null}
+            <span className="relative flex h-5 w-5 items-center justify-center">
               {nearbyLoading ? (
-                <Loader2 className="h-4 w-4 md:h-4 md:w-4 animate-spin" />
+                <>
+                  <span aria-hidden="true" className="absolute inset-0 animate-ping rounded-full bg-primary/30" />
+                  <NearbyGlyph className="relative h-[17px] w-[17px]" />
+                </>
               ) : (
-                <MapPin className="h-4 w-4 md:h-4 md:w-4" />
+                <NearbyGlyph
+                  className={`h-[17px] w-[17px] transition-transform duration-300 ease-out group-hover:-translate-y-px group-hover:translate-x-px group-hover:-rotate-12 ${
+                    nearbyMode ? "fill-white/25" : "fill-primary/15"
+                  }`}
+                />
               )}
-              <span className="text-[9px] md:text-xs font-medium leading-none md:leading-normal">
-                {nearbyPhase === "locating"
-                  ? "Locating"
-                  : nearbyPhase === "searching"
-                    ? "Finding"
-                    : nearbyMode
-                      ? "Nearby"
-                      : "Near Me"}
-              </span>
-            </div>
+            </span>
+            <span className="relative hidden whitespace-nowrap md:inline">
+              {nearbyPhase === "locating"
+                ? "Locating…"
+                : nearbyPhase === "searching"
+                  ? "Finding…"
+                  : nearbyMode
+                    ? "Nearby"
+                    : "Near me"}
+            </span>
           </button>
         </div>
       </form>
 
       {/* SUGGESTIONS DROPDOWN */}
-      {open && suggestions.length > 0 && (
-        <div className="absolute top-[calc(100%+8px)] left-0 right-0 z-50 bg-white rounded-2xl shadow-[0_8px_30px_-4px_rgba(0,0,0,0.18)] border border-border overflow-hidden">
+      {showEmptyPanel ? (
+        <div
+          onMouseDown={(event) => event.preventDefault()}
+          className="absolute top-[calc(100%+8px)] left-0 right-0 z-50 max-h-[70vh] overflow-y-auto rounded-2xl border border-border bg-white py-2 shadow-[0_8px_30px_-4px_rgba(0,0,0,0.18)]"
+        >
+          {locationPrompt ? (
+            <div className="mx-3 mb-2 rounded-xl border border-primary/15 bg-primary/[0.04] p-3">
+              <p className="text-sm font-semibold text-black">Show the nearest libraries first?</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">We use your location only to sort results. It isn&apos;t saved on our servers.</p>
+              <div className="mt-2.5 flex gap-2">
+                <button
+                  type="button"
+                  onClick={allowPreciseLocation}
+                  disabled={locating}
+                  className="rounded-full bg-primary px-3.5 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
+                >
+                  {locating ? "Locating…" : "Use my location"}
+                </button>
+                <button type="button" onClick={finishLocationPrompt} className="rounded-full px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-black">
+                  Not now
+                </button>
+              </div>
+            </div>
+          ) : null}
+          <button
+            type="button"
+            onClick={handleNearMeClick}
+            className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-muted/60"
+          >
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <NearbyGlyph className="h-4 w-4 fill-primary/15" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-black">Libraries near me</span>
+              <span className="block text-[11px] text-muted-foreground">Use your current location</span>
+            </span>
+          </button>
+
+          {recents.length > 0 ? (
+            <div className="mt-1">
+              <div className="flex items-center justify-between px-4 pb-1 pt-2">
+                <p className="text-xs font-semibold text-muted-foreground">Recent</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearRecentSearches();
+                    setRecents([]);
+                  }}
+                  className="text-xs font-medium text-muted-foreground hover:text-black"
+                >
+                  Clear
+                </button>
+              </div>
+              {recents.slice(0, 5).map((recent) => (
+                <button
+                  key={recent.href}
+                  type="button"
+                  onClick={() => {
+                    setRecents(addRecentSearch(recent));
+                    router.push(recent.href);
+                    setFocused(false);
+                    inputRef.current?.blur();
+                  }}
+                  className="flex w-full items-center gap-3 px-4 py-2 text-left hover:bg-muted/60"
+                >
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+                    <Clock className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-sm text-black">{recent.label}</span>
+                  {recent.city && recent.city !== city ? (
+                    <span className="shrink-0 text-xs capitalize text-muted-foreground">{slugToLabel(recent.city)}</span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {popular.length > 0 ? (
+            <div className="mt-1">
+              <p className="px-4 pb-1 pt-2 text-xs font-semibold text-muted-foreground">
+                {userLocation?.accuracy === "precise" ? "Popular near you" : `Popular in ${slugToLabel(city)}`}
+              </p>
+              {popular.map((place) => (
+                <button
+                  key={place.slug}
+                  type="button"
+                  onClick={() =>
+                    handleSuggestionClick({ type: "locality", label: place.label, slug: place.slug, city: place.city } as Suggestion)
+                  }
+                  className="flex w-full items-center gap-3 px-4 py-2 text-left hover:bg-muted/60"
+                >
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+                    <TrendingUp className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm text-black">{place.label}</span>
+                    <span className="block truncate text-[11px] text-muted-foreground">{place.sublabel}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {!showEmptyPanel && open && (suggestions.length > 0 || chip) && (
+        <div
+          onMouseDown={(event) => event.preventDefault()}
+          className="absolute top-[calc(100%+8px)] left-0 right-0 z-50 max-h-[70vh] overflow-y-auto bg-white rounded-2xl shadow-[0_8px_30px_-4px_rgba(0,0,0,0.18)] border border-border"
+        >
+          {chip ? (
+            <div className="px-3 pt-3">
+              <button
+                type="button"
+                onClick={() => handleChipClick(chip)}
+                className="flex w-full items-center gap-3 rounded-xl border border-primary/20 bg-primary/[0.04] px-3 py-2.5 text-left transition-colors hover:border-primary/40 hover:bg-primary/[0.07]"
+              >
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Sparkles className="h-4 w-4" />
+                </span>
+                <span className="min-w-0 flex-1 truncate text-sm font-semibold text-black">{chip.label}</span>
+                <span aria-hidden="true" className="text-primary">→</span>
+              </button>
+            </div>
+          ) : null}
           {(() => {
             let runningIndex = -1;
-            return ORDERED_TYPES.map((type) => {
+            return orderedTypes.map((type) => {
               const items = grouped[type];
               if (!items?.length) return null;
               const Icon = TYPE_ICON[type];
               return (
                 <div key={type}>
-                  <div className="px-4 pt-3 pb-1">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                      {GROUP_LABEL[type]}
-                    </p>
-                  </div>
+                  {GROUP_LABEL[type] ? (
+                    <div className="px-4 pt-3 pb-1">
+                      <p className="text-xs font-semibold text-muted-foreground">{GROUP_LABEL[type]}</p>
+                    </div>
+                  ) : (
+                    <div className="pt-2" />
+                  )}
                   {items.map((s, i) => (
                     (() => {
                       runningIndex += 1;
@@ -621,7 +1099,7 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
                             prefetchSuggestionRoute(s);
                             setHighlightedIndex(itemIndex);
                           }}
-                          onClick={() => handleSuggestionClick(s)}
+                          onClick={() => handleSuggestionClick(s, itemIndex)}
                           className={`w-full flex items-center gap-3 px-4 py-2.5 transition-colors text-left ${isActive ? "bg-muted/80" : "hover:bg-muted/60"
                             }`}
                         >
@@ -630,14 +1108,29 @@ export function SearchBar({ city = "delhi", compact = false }: SearchBarProps) {
                             <Icon className="h-4 w-4 text-muted-foreground" />
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="text-sm font-medium text-black truncate">{s.label}</div>
+                            <div className="text-sm text-black truncate">
+                              {highlightParts(s.label, query).map((part, partIndex) =>
+                                part.match ? (
+                                  <strong key={partIndex} className="font-semibold">{part.text}</strong>
+                                ) : (
+                                  <span key={partIndex}>{part.text}</span>
+                                ),
+                              )}
+                            </div>
+                            {s.sublabel ? (
+                              <div className="truncate text-[11px] text-muted-foreground">{s.sublabel}</div>
+                            ) : null}
                             {s.type === "nearby" && typeof s.distance_km === "number" && (
                               <div className="text-[11px] text-muted-foreground">
                                 {formatDistance(s.distance_km)}
                               </div>
                             )}
                           </div>
-                          <span className="ml-auto text-xs text-muted-foreground shrink-0 capitalize">{s.city}</span>
+                          {citySlug(s.city) !== city ? (
+                            <span className="ml-auto shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                              {slugToLabel(citySlug(s.city))}
+                            </span>
+                          ) : null}
                         </button>
                       );
                     })()

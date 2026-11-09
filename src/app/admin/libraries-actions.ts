@@ -6,12 +6,19 @@ import {
   revalidateLibraryContent,
 } from "@/lib/revalidate-library-content";
 import { getCurrentActorUserId, logLibraryActivity } from "@/lib/library-activity";
-import { requireApprovedStaff } from "@/lib/staff-access";
+import { getLibraryMutationAccess } from "@/lib/staff-access";
 
 export async function setLibraryVerificationStatus(id: string, newStatus: "verified" | "unverified") {
-  await requireApprovedStaff(["admin"]);
+  if (newStatus !== "verified" && newStatus !== "unverified") {
+    return { ok: false as const, error: "Unknown status." };
+  }
+  // Admins: any library. Sales: only libraries in their assigned localities.
+  const staff = await getLibraryMutationAccess(id);
+  if (!staff) {
+    return { ok: false as const, error: "You can only verify libraries in your assigned localities." };
+  }
   const actorUserId = await getCurrentActorUserId();
-  
+
   const { error } = await supabaseServer
     .from("library_branches")
     .update({
@@ -23,7 +30,7 @@ export async function setLibraryVerificationStatus(id: string, newStatus: "verif
 
   if (error) {
     console.error("Failed to toggle verification", error);
-    return { ok: false };
+    return { ok: false as const, error: "Could not save. Please try again." };
   }
 
   revalidateLibraryContent(await getLibraryCacheTarget(id));
@@ -34,5 +41,5 @@ export async function setLibraryVerificationStatus(id: string, newStatus: "verif
     changedFields: ["verification_status"],
   });
 
-  return { ok: true, newStatus };
+  return { ok: true as const, newStatus };
 }

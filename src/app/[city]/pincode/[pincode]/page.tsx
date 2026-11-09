@@ -9,6 +9,7 @@ import { getSiteUrl } from "@/lib/site-url";
 import { DeferredSaveButton } from "@/components/deferred-save-button";
 import { IntentLink } from "@/components/intent-link";
 import type { Metadata } from "next";
+import { slugToIlikePattern, slugToLabel } from "@/lib/places";
 
 interface PageProps {
   params: Promise<{ city: string; pincode: string }>;
@@ -23,7 +24,7 @@ async function getLibrariesByPincode(city: string, pincode: string): Promise<Lib
       .from("library_branches")
       .select(selectClause)
       .eq("is_active", true)
-      .ilike("city", city)
+      .ilike("city", slugToIlikePattern(city))
       .eq("pin_code", pincode)
       .order("profile_completeness_score", { ascending: false }),
   );
@@ -33,7 +34,7 @@ const getCachedLibrariesByPincode = unstable_cache(
   async (city: string, pincode: string) => getLibrariesByPincode(city, pincode),
   ["libraries-by-pincode"],
   {
-    revalidate: 120,
+    revalidate: 3600,
     tags: ["library-cards"],
   },
 );
@@ -41,39 +42,17 @@ const getCachedLibrariesByPincode = unstable_cache(
 const getPincodeLibraries =
   process.env.NODE_ENV === "development" ? getLibrariesByPincode : getCachedLibrariesByPincode;
 
+// Rendered on first request, then cached (ISR).
 export async function generateStaticParams() {
-  if (process.env.NODE_ENV === "development") {
-    return [];
-  }
-
-  const { data } = await supabaseServer
-    .from("library_branches")
-    .select("city, pin_code")
-    .not("pin_code", "is", null);
-  const rows = (data as Array<{ city: string; pin_code: string }>) ?? [];
-
-  const seen = new Set<string>();
-  const params: { city: string; pincode: string }[] = [];
-
-  for (const row of rows) {
-    if (!row.pin_code) continue;
-    const key = `${row.city.toLowerCase()}-${row.pin_code}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    params.push({
-      city: row.city.toLowerCase(),
-      pincode: row.pin_code.toLowerCase().replace(/\s+/g, "-"),
-    });
-  }
-  return params;
+  return [];
 }
 
-export const revalidate = 120;
+export const revalidate = 3600;
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { city, pincode } = await params;
   const formattedPincode = formatPincode(pincode);
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/pincode/${pincode}`;
   return {
@@ -104,7 +83,7 @@ export default async function PincodePage({ params }: PageProps) {
   if (libraries.length === 0) notFound();
   logPerf("pincode", [librariesMeasurement.metric], `city="${city}" pincode="${pincode}" count=${libraries.length}`);
 
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
 
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/pincode/${pincode}`;

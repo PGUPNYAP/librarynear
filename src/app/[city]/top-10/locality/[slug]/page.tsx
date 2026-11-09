@@ -9,6 +9,7 @@ import { getSiteUrl } from "@/lib/site-url";
 import { DeferredSaveButton } from "@/components/deferred-save-button";
 import { IntentLink } from "@/components/intent-link";
 import type { Metadata } from "next";
+import { slugToIlikePattern, slugToLabel } from "@/lib/places";
 
 interface PageProps {
   params: Promise<{ city: string; slug: string }>;
@@ -27,7 +28,7 @@ async function getTop10LocalityLibraries(city: string, locality: string): Promis
       .from("library_branches")
       .select(selectClause)
       .eq("is_active", true)
-      .ilike("city", city)
+      .ilike("city", slugToIlikePattern(city))
       .ilike("locality", locality)
       .order("aggregate_rating", { ascending: false })
       .order("review_count", { ascending: false })
@@ -39,7 +40,7 @@ const getCachedTop10LocalityLibraries = unstable_cache(
   async (city: string, locality: string) => getTop10LocalityLibraries(city, locality),
   ["libraries-top-10-locality"],
   {
-    revalidate: 120,
+    revalidate: 3600,
     tags: ["library-cards"],
   },
 );
@@ -47,17 +48,17 @@ const getCachedTop10LocalityLibraries = unstable_cache(
 const getLocalTop10Libraries =
   process.env.NODE_ENV === "development" ? getTop10LocalityLibraries : getCachedTop10LocalityLibraries;
 
-export const revalidate = 120;
+export const revalidate = 3600;
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { city, slug } = await params;
   const locality = formatLocalityName(slug);
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/top-10/locality/${slug}`;
   
   return {
-    title: `Top 10 Best Libraries in ${locality}, ${cityLabel} | LibraryNear`,
+    title: `Top 10 Best Libraries in ${locality}, ${cityLabel}`,
     description: `Discover the top 10 highest-rated study libraries and reading rooms in ${locality}, ${cityLabel}. Compare reviews, fees, and amenities.`,
     alternates: {
       canonical: pageUrl,
@@ -85,7 +86,7 @@ export default async function Top10LocalityLibrariesPage({ params }: PageProps) 
   
   logPerf("top-10-locality", [librariesMeasurement.metric], `city="${city}" locality="${locality}" count=${libraries.length}`);
 
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/top-10/locality/${slug}`;
   

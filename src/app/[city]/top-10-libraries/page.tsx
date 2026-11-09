@@ -9,6 +9,7 @@ import { getSiteUrl } from "@/lib/site-url";
 import { DeferredSaveButton } from "@/components/deferred-save-button";
 import { IntentLink } from "@/components/intent-link";
 import type { Metadata } from "next";
+import { slugToIlikePattern, slugToLabel } from "@/lib/places";
 
 interface PageProps {
   params: Promise<{ city: string }>;
@@ -20,7 +21,7 @@ async function getTop10Libraries(city: string): Promise<LibraryCardData[]> {
       .from("library_branches")
       .select(selectClause)
       .eq("is_active", true)
-      .ilike("city", city)
+      .ilike("city", slugToIlikePattern(city))
       .order("aggregate_rating", { ascending: false })
       .order("review_count", { ascending: false })
       .limit(10),
@@ -31,7 +32,7 @@ const getCachedTop10Libraries = unstable_cache(
   async (city: string) => getTop10Libraries(city),
   ["libraries-top-10"],
   {
-    revalidate: 120,
+    revalidate: 3600,
     tags: ["library-cards"],
   },
 );
@@ -39,16 +40,16 @@ const getCachedTop10Libraries = unstable_cache(
 const getCityTop10Libraries =
   process.env.NODE_ENV === "development" ? getTop10Libraries : getCachedTop10Libraries;
 
-export const revalidate = 120;
+export const revalidate = 3600;
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { city } = await params;
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/top-10-libraries`;
   
   return {
-    title: `Top 10 Best Libraries in ${cityLabel} (Ranked) | LibraryNear`,
+    title: `Top 10 Best Libraries in ${cityLabel} (Ranked)`,
     description: `Discover the top 10 highest-rated study libraries and reading rooms in ${cityLabel}. Compare reviews, fees, and amenities to find the best place to study.`,
     alternates: {
       canonical: pageUrl,
@@ -75,7 +76,7 @@ export default async function Top10LibrariesPage({ params }: PageProps) {
   
   logPerf("top-10", [librariesMeasurement.metric], `city="${city}" count=${libraries.length}`);
 
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/top-10-libraries`;
   

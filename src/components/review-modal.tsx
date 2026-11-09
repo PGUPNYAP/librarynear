@@ -31,14 +31,14 @@ export function ReviewModal({
       setError("Please select a rating.");
       return;
     }
-    if (!reviewText.trim()) {
-      setError("Please write a review.");
+    if (reviewText.trim().length < 10) {
+      setError("Please write at least 10 characters.");
       return;
     }
 
     startTransition(async () => {
       const res = await submitReview(libraryBranchId, rating, reviewText, pathname);
-      if (res?.error) {
+      if ("error" in res) {
         setError(res.error);
       } else {
         onClose();
@@ -92,9 +92,12 @@ export function ReviewModal({
               onChange={(e) => setReviewText(e.target.value)}
               placeholder="Tell others about your experience..."
               rows={4}
+              maxLength={2000}
+              aria-label="Your review"
               className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary transition-shadow"
               disabled={isPending}
             />
+            <p className="text-right text-xs text-gray-400">{reviewText.length}/2000</p>
           </div>
 
           <div className="flex justify-end gap-3 pt-4">

@@ -9,13 +9,16 @@ import { logPerf, measureAsync } from "@/lib/perf";
 import { DeferredSaveButton } from "@/components/deferred-save-button";
 import { HomeSearchShell } from "@/components/home-search-shell";
 import { IntentLink } from "@/components/intent-link";
+import { CityIcon } from "@/components/city-icon";
 import { LibraryGridSkeleton } from "@/components/library-listing-skeleton";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getSiteUrl } from "@/lib/site-url";
 import { sanitizeSearchTerm } from "@/lib/postgrest";
+import { getActiveCities } from "@/lib/cities-server";
+import { getCityLocalities } from "@/lib/library-search";
 
 
-export const revalidate = 120;
+export const revalidate = 1800;
 
 function HomeSkeleton() {
   return (
@@ -45,6 +48,7 @@ async function getLibraries(locality?: string, q?: string): Promise<LibraryCardD
       .from("library_branches")
       .select(selectClause)
       .eq("is_active", true)
+      .eq("city", "Delhi")
       .not("cover_image_url", "is", null)
       .neq("cover_image_url", "")
       .order("profile_completeness_score", { ascending: false })
@@ -64,7 +68,7 @@ const getCachedLibraries = unstable_cache(
   async (locality?: string, q?: string) => getLibraries(locality, q),
   ["home-libraries"],
   {
-    revalidate: 120,
+    revalidate: 1800,
     tags: ["library-cards"],
   },
 );
@@ -73,36 +77,15 @@ const getHomeLibraries =
   process.env.NODE_ENV === "development" ? getLibraries : getCachedLibraries;
 
 async function getTopLocalities(): Promise<string[]> {
-  const { data, error } = await supabaseServer
-    .from("library_branches")
-    .select("locality")
-    .eq("is_active", true)
-    .not("locality", "is", null);
-
-  if (error) {
-    console.warn("Unable to load homepage locality strip", error.message);
-    return [];
-  }
-
-  const counts: Record<string, number> = {};
-  for (const row of data ?? []) {
-    const normalizedLocality = row.locality?.trim();
-    if (normalizedLocality) {
-      counts[normalizedLocality] = (counts[normalizedLocality] ?? 0) + 1;
-    }
-  }
-
-  return Object.entries(counts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 25)
-    .map(([name]) => name);
+  const rows = await getCityLocalities("Delhi");
+  return rows.slice(0, 25).map((row) => row.name);
 }
 
 const getCachedTopLocalities = unstable_cache(
   async () => getTopLocalities(),
   ["home-top-localities"],
   {
-    revalidate: 120,
+    revalidate: 1800,
     tags: ["library-cards"],
   },
 );
@@ -132,9 +115,10 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 async function HomeContent() {
-  const [librariesMeasurement, topLocalitiesMeasurement] = await Promise.all([
+  const [librariesMeasurement, topLocalitiesMeasurement, cities] = await Promise.all([
     measureAsync("libraries", () => getHomeLibraries()),
     measureAsync("topLocalities", () => getHomeTopLocalities()),
+    getActiveCities(),
   ]);
   const libraries = prioritizeLibrariesWithPhotos(librariesMeasurement.result).map(withCardImage);
   const topLocalities = topLocalitiesMeasurement.result;
@@ -144,7 +128,6 @@ async function HomeContent() {
     `count=${libraries.length}`,
   );
 
-  const siteUrl = getSiteUrl();
 
   const homeFaqs = [
     {
@@ -165,44 +148,8 @@ async function HomeContent() {
     },
   ];
 
+  // Organization and WebSite markup is site-wide (root layout).
   const homeJsonLd = [
-    {
-      "@context": "https://schema.org",
-      "@type": "WebSite",
-      name: "LibraryNear",
-      url: siteUrl,
-      potentialAction: {
-        "@type": "SearchAction",
-        target: `${siteUrl}/delhi/libraries?q={search_term_string}`,
-        "query-input": "required name=search_term_string",
-      },
-    },
-    {
-      "@context": "https://schema.org",
-      "@type": "Organization",
-      name: "LibraryNear",
-      url: siteUrl,
-      logo: `${siteUrl}/logo-icon.webp`,
-      contactPoint: {
-        "@type": "ContactPoint",
-        telephone: "+91-8796190507",
-        contactType: "customer service",
-        email: "librarynear.com@gmail.com",
-      },
-      address: {
-        "@type": "PostalAddress",
-        streetAddress: "DTU IIF AB-4, Shahbad",
-        addressLocality: "Rohini",
-        addressRegion: "Delhi",
-        postalCode: "110042",
-        addressCountry: "IN",
-      },
-      sameAs: [
-        "https://youtube.com/@librarynear",
-        "https://x.com/Librarynear_com",
-        "https://www.instagram.com/librarynear.com1/",
-      ],
-    },
     {
       "@context": "https://schema.org",
       "@type": "FAQPage",
@@ -364,6 +311,28 @@ async function HomeContent() {
                 </IntentLink>
               ))}
             </div>
+          </div>
+        </section>
+      )}
+
+      {/* Browse by city */}
+      {cities.length > 1 && (
+        <section className="border-t border-border/40 bg-white">
+          <div className="container mx-auto px-6 py-12 md:px-10">
+            <div className="mb-6 flex items-end justify-between gap-4">
+              <h2 className="text-2xl font-bold text-black">Find libraries in other cities</h2>
+              <IntentLink href="/cities" className="text-sm font-semibold text-primary hover:underline">All cities</IntentLink>
+            </div>
+            <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              {cities.slice(0, 12).map((city) => (
+                <li key={city.slug}>
+                  <IntentLink href={`/${city.slug}`} className="block rounded-2xl border border-border p-4 transition-colors hover:border-black">
+                    <CityIcon slug={city.slug} className="mb-2 h-7 w-7 text-primary" />
+                    <span className="block font-semibold text-black">{city.name}</span>
+                  </IntentLink>
+                </li>
+              ))}
+            </ul>
           </div>
         </section>
       )}

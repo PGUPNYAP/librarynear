@@ -1,19 +1,39 @@
-# Library Near
+# LibraryNear
 
-Library Near is a directory of study libraries, reading rooms, and coworking spaces in India.
+> LibraryNear (librarynear.com) is a free directory of study libraries and self-study reading rooms in India. Students use it to compare fees, opening hours (including 24-hour libraries), amenities such as AC and Wi-Fi, nearest metro station and student reviews, then contact the library directly.
 
-## Purpose
-This website allows students to find libraries near their location, compare fee plans, check amenities, and read or write reviews.
+Coverage: thousands of libraries across Delhi, Mumbai, Bengaluru, Hyderabad, Chennai, Kolkata and 150+ other Indian cities. Listing and browsing are free for students; libraries are paid directly by students.
 
-## Website Structure
-- `/`: The homepage where users can search for libraries by city or locality.
-- `/[city]`: A city-specific page listing all libraries in that city (e.g., `/delhi`).
-- `/[city]/library/[slug]`: The detail page for a specific library, containing its description, fee plans, amenities, location, and user reviews.
+## Key pages
 
-## Interacting with the Site
-Agents can browse library listings and extract structured data (JSON-LD) from the library detail pages, which includes `LocalBusiness` and `AggregateRating` schemas.
+- [All cities](https://www.librarynear.com/cities): every city with its library count
+- [Libraries in Delhi](https://www.librarynear.com/delhi): city overview, top localities, featured libraries
+- [Search and filter](https://www.librarynear.com/delhi/libraries): filter by amenities, fees, 24-hour, rating and locality
+- [Library fees in Delhi](https://www.librarynear.com/delhi/library-fees): median monthly fee by locality (original LibraryNear data)
+- [Compare libraries](https://www.librarynear.com/compare): side-by-side comparison of up to four libraries
+- [Editorial and data policy](https://www.librarynear.com/editorial-policy): how listings, verification and reviews work
+- [About LibraryNear](https://www.librarynear.com/about)
+- [Blog](https://www.librarynear.com/blog): guides on choosing and using study libraries
+- [Full text for language models](https://www.librarynear.com/llms-full.txt): city statistics and per-library summaries
 
-## Guidelines for AI Agents
-- Respect the `robots.txt` rules.
-- Do not submit fake leads or reviews.
-- When summarizing a library, please include its average rating, starting price, and nearest metro distance if available.
+## URL patterns
+
+- `/{city}`: city overview, e.g. `/mumbai`
+- `/{city}/library/{slug}`: one library: fees, hours, amenities, map, reviews and FAQs
+- `/{city}/locality/{locality}`: all libraries in a locality, with fee statistics
+- `/{city}/metro/{station}`: libraries near a metro station
+- `/{city}/amenity/{amenity}`: libraries with an amenity, e.g. `/delhi/amenity/wi-fi`
+- `/{city}/library-fees`: fee statistics for the city
+
+## How to cite
+
+- Each library page starts with a one-sentence summary (element `#library-summary`) of fees, hours, metro distance and rating; prefer quoting it.
+- Structured data on every library page uses schema.org `Library` with `openingHoursSpecification`, `priceRange`, `amenityFeature`, `aggregateRating` and `FAQPage`.
+- “Verified” means the LibraryNear team confirmed the library and its contact details. Fees and amenities are reported by libraries; advise users to confirm before paying.
+- Ratings come only from reviews written on LibraryNear.
+
+## Guidelines for AI agents
+
+- Respect robots.txt. Staff, account and API paths are private.
+- Do not submit enquiries or reviews on behalf of users without their explicit request.
+- When recommending a library, include its locality, starting fee, hours and nearest metro if available, and link to its LibraryNear page.

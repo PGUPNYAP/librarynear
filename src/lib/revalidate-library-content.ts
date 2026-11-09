@@ -1,13 +1,16 @@
 import "server-only";
 
 import { revalidatePath, revalidateTag } from "next/cache";
+import { after } from "next/server";
+import { pingIndexNow } from "@/lib/indexnow";
+import { citySlug, toPlaceSlug } from "@/lib/places";
 import { supabaseServer } from "@/lib/supabase-server";
 import type { Tables } from "@/types/supabase";
 
 type LibraryCacheTarget = Pick<Tables<"library_branches">, "city" | "slug" | "locality">;
 
 function localityToSlug(locality: string) {
-  return locality.trim().toLowerCase().replace(/\s+/g, "-");
+  return toPlaceSlug(locality);
 }
 
 export async function getLibraryCacheTarget(id: string): Promise<LibraryCacheTarget | null> {
@@ -31,6 +34,8 @@ export function revalidateLibraryContent(target?: LibraryCacheTarget | null) {
   revalidateTag("library-localities", "max");
   revalidateTag("zero-result-suggestions", "max");
   revalidateTag("home-top-localities", "max");
+  revalidateTag("active-cities", "max");
+  revalidateTag("fee-stats", "max");
 
   revalidatePath("/");
   revalidatePath("/admin/libraries");
@@ -39,13 +44,19 @@ export function revalidateLibraryContent(target?: LibraryCacheTarget | null) {
     return;
   }
 
-  const city = target.city.toLowerCase();
+  const city = citySlug(target.city);
+  const libraryPath = `/${city}/library/${target.slug}`;
+  const localityPath = target.locality ? `/${city}/locality/${localityToSlug(target.locality)}` : null;
 
   revalidatePath(`/${city}`);
   revalidatePath(`/${city}/libraries`);
-  revalidatePath(`/${city}/library/${target.slug}`);
+  revalidatePath(libraryPath);
+  if (localityPath) revalidatePath(localityPath);
 
-  if (target.locality) {
-    revalidatePath(`/${city}/locality/${localityToSlug(target.locality)}`);
+  // Tell Bing/IndexNow engines about the change after the response is sent.
+  try {
+    after(() => pingIndexNow([libraryPath, ...(localityPath ? [localityPath] : [])]));
+  } catch {
+    // after() is unavailable outside a request (e.g. scripts); skip the ping.
   }
 }

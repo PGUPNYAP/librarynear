@@ -21,12 +21,13 @@ import {
   isValidLatitude,
   isValidLongitude,
   isValidPinCode,
+  normalizeIndianMobile,
   normalizeIndianPhone,
 } from "@/lib/owner-form-validation";
 import { logLibraryActivity } from "@/lib/library-activity";
 import { resolveGoogleMapsCoordinates } from "@/lib/server/google-maps-resolver";
 import { cleanupImageKitFiles, isOwnerSubmissionImageUrl } from "@/lib/server/imagekit";
-import { checkRateLimit, getClientIp, RATE_LIMITS } from "@/lib/rate-limit";
+import { getClientIp, rateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 
 const MAX_OWNER_PHOTOS = 3;
 
@@ -62,6 +63,46 @@ type ExistingOwnerSubmission = {
 
 function getTrimmedString(formData: FormData, key: string) {
   return String(formData.get(key) ?? "").trim();
+}
+
+const OWNER_CLEARABLE = new Set(["district", "description", "whatsapp_number"]);
+
+/**
+ * New submission: the typed value (empty = nothing).
+ * Editing a returned submission: the form shows old values as placeholders,
+ * so empty keeps the old value unless clear_<field> is ticked.
+ */
+function readOwnerField(formData: FormData, key: string, existing: string | number | null | undefined, editing: boolean) {
+  if (OWNER_CLEARABLE.has(key) && formData.get(`clear_${key}`) === "on") return "";
+  const submitted = getTrimmedString(formData, key);
+  if (submitted || !editing) return submitted;
+  return existing === null || existing === undefined ? "" : String(existing);
+}
+
+/** An existing listing that looks like the same library (same phone, or same name in the same locality). */
+async function findPossibleDuplicate(phone: string | null, displayName: string, locality: string, city: string) {
+  if (phone) {
+    const { data } = await supabaseServer
+      .from("library_branches")
+      .select("id")
+      .eq("is_active", true)
+      .eq("phone_number", phone)
+      .limit(1)
+      .maybeSingle();
+    if (data?.id) return data.id as string;
+  }
+  const namePattern = displayName.replace(/[%_\\]/g, "").trim();
+  if (namePattern.length < 3) return null;
+  const { data } = await supabaseServer
+    .from("library_branches")
+    .select("id")
+    .eq("is_active", true)
+    .eq("city", city)
+    .ilike("display_name", namePattern)
+    .ilike("locality", locality.replace(/[%_\\]/g, ""))
+    .limit(1)
+    .maybeSingle();
+  return (data?.id as string | undefined) ?? null;
 }
 
 function getExistingImageUrls(formData: FormData) {
@@ -109,7 +150,7 @@ async function loadExistingOwnerSubmission(userId: string) {
 export async function submitOwnerLibrary(formData: FormData) {
   const hdrs = await headers();
   const ip = getClientIp(hdrs);
-  const rateCheck = checkRateLimit(ip, RATE_LIMITS.submitOwnerLibrary);
+  const rateCheck = await rateLimit(ip, RATE_LIMITS.submitOwnerLibrary);
   if (!rateCheck.success) {
     redirect("/for-owners?error=rate_limited");
   }
@@ -133,23 +174,29 @@ export async function submitOwnerLibrary(formData: FormData) {
     ownerErrorRedirect("duplicate_submission");
   }
 
-  const displayName = getTrimmedString(formData, "display_name") || existingSubmission?.display_name || "";
-  const locality = getTrimmedString(formData, "locality") || existingSubmission?.locality || "";
-  const city = getTrimmedString(formData, "city") || existingSubmission?.city || "";
-  const district = getTrimmedString(formData, "district") || existingSubmission?.district || null;
-  const state = getTrimmedString(formData, "state") || existingSubmission?.state || "";
-  const pinCode = getTrimmedString(formData, "pin_code") || existingSubmission?.pin_code || "";
-  const fullAddress = getTrimmedString(formData, "full_address") || existingSubmission?.full_address || "";
-  const openingTime = getTrimmedString(formData, "opening_time") || existingSubmission?.opening_time || "";
-  const closingTime = getTrimmedString(formData, "closing_time") || existingSubmission?.closing_time || "";
-  const rawMapLink = getTrimmedString(formData, "map_link") || existingSubmission?.map_link || "";
-  const description = getTrimmedString(formData, "description") || existingSubmission?.description || null;
-  const totalSeatsRaw = getTrimmedString(formData, "total_seats");
-  const totalSeats = totalSeatsRaw ? Number.parseInt(totalSeatsRaw, 10) : Number(existingSubmission?.total_seats ?? Number.NaN);
-  const rawPhone = getTrimmedString(formData, "phone_number") || existingSubmission?.phone_number || "";
-  const rawWhatsapp = getTrimmedString(formData, "whatsapp_number") || existingSubmission?.whatsapp_number || "";
+  const editing = Boolean(existingSubmission);
+  const field = (key: keyof ExistingOwnerSubmission) =>
+    readOwnerField(formData, key, existingSubmission?.[key] as string | number | null | undefined, editing);
+
+  const displayName = field("display_name");
+  const locality = field("locality");
+  const city = field("city");
+  const district = field("district") || null;
+  const state = field("state");
+  const pinCode = field("pin_code");
+  const fullAddress = field("full_address");
+  const open24h = formData.get("open_24h") === "on";
+  const openingTime = open24h ? "00:00" : field("opening_time");
+  const closingTime = open24h ? "00:00" : field("closing_time");
+  const rawMapLink = field("map_link");
+  const description = field("description") || null;
+  const totalSeatsRaw = field("total_seats");
+  const totalSeats = totalSeatsRaw ? Number.parseInt(totalSeatsRaw, 10) : Number.NaN;
+  const rawPhone = field("phone_number");
+  const rawWhatsapp = field("whatsapp_number");
   const normalizedPhone = normalizeIndianPhone(rawPhone);
-  const normalizedWhatsapp = rawWhatsapp ? normalizeIndianPhone(rawWhatsapp) : null;
+  // WhatsApp only works on mobiles.
+  const normalizedWhatsapp = rawWhatsapp ? normalizeIndianMobile(rawWhatsapp) : null;
   const rawPlansJson = String(formData.get("fee_plans_json") ?? "");
   const feePlans = parsePlanDraftsJson(rawPlansJson);
   const amenityValuesRaw = formData
@@ -267,8 +314,14 @@ export async function submitOwnerLibrary(formData: FormData) {
     ownerErrorRedirect("invalid_image");
   }
 
+  // Flag (don't block) submissions that look like one of our existing listings,
+  // so an admin can check ownership before approving.
+  const possibleDuplicateOf = await findPossibleDuplicate(normalizedPhone, displayName, locality, city);
+
   const payload = {
     user_id: user.id,
+    ownership_status: "unverified",
+    possible_duplicate_of: possibleDuplicateOf,
     display_name: displayName,
     city,
     locality,
@@ -303,14 +356,14 @@ export async function submitOwnerLibrary(formData: FormData) {
           .update({
             ...payload,
             submitted_library_branch_id: existingSubmission.submitted_library_branch_id,
-          })
+          } as never)
           .eq("id", existingSubmission.id)
           .eq("user_id", user.id)
       ).error
     : (
         await supabase
           .from("owner_library_submissions")
-          .insert(payload)
+          .insert(payload as never)
       ).error;
 
   if (error) {
@@ -319,12 +372,17 @@ export async function submitOwnerLibrary(formData: FormData) {
     ownerErrorRedirect("submission_failed");
   }
 
+  // These photos are now part of a submission; stop tracking them for cleanup.
+  if (uploadedImageFileIds.length > 0) {
+    await supabaseServer.from("pending_uploads" as never).delete().in("file_id" as never, uploadedImageFileIds as never);
+  }
+
   redirect("/for-owners?submitted=1");
 }
 
 export async function updateOwnerSubmissionPlans(formData: FormData) {
   const ip = getClientIp(await headers());
-  const rateCheck = checkRateLimit(ip, RATE_LIMITS.ownerPlansUpdate);
+  const rateCheck = await rateLimit(ip, RATE_LIMITS.ownerPlansUpdate);
   if (!rateCheck.success) {
     redirect("/for-owners?plans_error=1");
   }
@@ -344,6 +402,12 @@ export async function updateOwnerSubmissionPlans(formData: FormData) {
 
   if (!submissionId || !hasValidPlanDescriptions(rawPlansJson)) {
     redirect("/for-owners?plans_error=1");
+  }
+
+  // An empty or broken payload must not silently delete every plan.
+  const confirmRemoveAll = formData.get("confirm_remove_all_plans") === "on";
+  if (feePlans.length === 0 && !confirmRemoveAll) {
+    redirect("/for-owners?plans_error=empty");
   }
 
   const { data: submission, error: submissionError } = await supabaseServer

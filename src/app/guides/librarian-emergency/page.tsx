@@ -1,9 +1,11 @@
+import { getSiteUrl } from "@/lib/site-url";
 import { Shield, Flame, Stethoscope, Activity, AlertTriangle, Zap, Phone, BookOpen, Clock, HardHat } from "lucide-react";
 import { IntentLink } from "@/components/intent-link";
 import { ChevronLeft } from "lucide-react";
 
 export const metadata = {
-  title: "Librarian Emergency Protocol — LibraryNear",
+  alternates: { canonical: `${getSiteUrl()}/guides/librarian-emergency` },
+  title: "Librarian Emergency Protocol",
   description: "Official crisis management and comprehensive response procedures for library staff during emergencies.",
 };
 

@@ -1,3 +1,4 @@
+import { getSiteUrl } from "@/lib/site-url";
 import Link from "next/link";
 import Image from "next/image";
 import { Suspense } from "react";
@@ -22,7 +23,8 @@ async function getPosts() {
 }
 
 export const metadata = {
-  title: "Blog — LibraryNear",
+  alternates: { canonical: `${getSiteUrl()}/blog` },
+  title: "Blog",
   description: "Read the latest tips, guides, and reviews about finding the best study spaces and libraries in Delhi.",
 };
 

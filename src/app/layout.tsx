@@ -7,8 +7,10 @@ import { Footer } from "@/components/footer";
 import { AuthSavedSync } from "@/components/auth/auth-saved-sync";
 import { NavigationFeedback } from "@/components/navigation-feedback";
 import { ScrollDirection } from "@/components/scroll-direction";
+import { CompareTray } from "@/components/compare-controls";
 import { Suspense } from "react";
 import { getSiteUrl } from "@/lib/site-url";
+import { siteGraph } from "@/lib/site-schema";
 
 const siteUrl = getSiteUrl();
 
@@ -20,9 +22,6 @@ export const metadata: Metadata = {
   description:
     "Discover and compare study libraries, reading rooms, and private coaching halls near you. Filter by locality, metro station, amenities, and fees.",
   metadataBase: new URL(siteUrl),
-  alternates: {
-    canonical: siteUrl,
-  },
   openGraph: {
     type: "website",
     siteName: "LibraryNear",
@@ -45,6 +44,9 @@ export const metadata: Metadata = {
   },
   verification: {
     google: "rJBJvfoFMWlJWCWWco0hcovhQEBs0gBmuzibnPiGHCo",
+    ...(process.env.BING_SITE_VERIFICATION
+      ? { other: { "msvalidate.01": process.env.BING_SITE_VERIFICATION } }
+      : {}),
   },
   robots: {
     index: true,
@@ -61,10 +63,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en-IN" suppressHydrationWarning>
       <body
         className="font-sans antialiased min-h-screen flex flex-col selection:bg-primary/20 selection:text-foreground"
       >
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(siteGraph()).replace(/</g, "\\u003c") }}
+        />
         <ThemeProvider
           attribute="class"
           defaultTheme="light"
@@ -79,10 +85,9 @@ export default function RootLayout({
             </Suspense>
             <div className="flex relative flex-col min-h-screen">
               <Navbar />
-              <main className="flex-1 flex flex-col">
-                <Suspense fallback={null}>{children}</Suspense>
-              </main>
+              <main className="flex-1 flex flex-col">{children}</main>
               <Footer />
+              <CompareTray />
             </div>
           </PostHogProvider>
         </ThemeProvider>

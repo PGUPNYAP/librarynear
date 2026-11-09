@@ -1,4 +1,7 @@
 import { countWords, normalizePlanDrafts, MAX_FEE_PLANS_JSON_BYTES } from "@/lib/library-plans";
+import { normalizeIndianMobile, normalizeIndianPhone as normalizePhone } from "@/lib/phone";
+
+export { normalizeIndianMobile };
 
 export type OwnerValidationErrorCode =
   | "duplicate_submission"
@@ -15,11 +18,9 @@ export type OwnerValidationErrorCode =
   | "invalid_image"
   | "rate_limited";
 
+/** Mobile or STD landline; accepts +91, 0091, a leading 0, spaces and dashes. */
 export function normalizeIndianPhone(value: string) {
-  const digits = value.replace(/\D/g, "");
-  if (digits.length === 10) return digits;
-  if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
-  return null;
+  return normalizePhone(value);
 }
 
 export function isValidPinCode(value: string) {
@@ -45,9 +46,20 @@ export function isValidMapLink(value: string | null) {
   }
 }
 
+const CLOCK = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
+
+/**
+ * Valid when both times are real clock times. Overnight hours (closing before
+ * opening, e.g. 18:00-02:00) and 24-hour libraries (00:00-00:00 or
+ * 00:00-23:59) are allowed; only an identical non-midnight pair is rejected.
+ */
 export function hasValidTimeRange(openingTime: string | null, closingTime: string | null) {
   if (!openingTime || !closingTime) return false;
-  return closingTime > openingTime;
+  if (!CLOCK.test(openingTime) || !CLOCK.test(closingTime)) return false;
+  const open = openingTime.slice(0, 5);
+  const close = closingTime.slice(0, 5);
+  if (open === close) return open === "00:00";
+  return true;
 }
 
 export function hasValidPlanDescriptions(rawPlansJson: string) {

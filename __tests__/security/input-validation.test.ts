@@ -196,12 +196,23 @@ describe("Owner Form Validation - Edge Cases", () => {
       expect(hasValidTimeRange("06:00", "22:00")).toBe(true);
     });
 
-    it("rejects when closing equals opening", () => {
+    it("rejects when closing equals opening (except 24h)", () => {
       expect(hasValidTimeRange("09:00", "09:00")).toBe(false);
     });
 
-    it("rejects when closing is before opening", () => {
-      expect(hasValidTimeRange("22:00", "06:00")).toBe(false);
+    it("accepts overnight hours (closing after midnight)", () => {
+      expect(hasValidTimeRange("22:00", "06:00")).toBe(true);
+      expect(hasValidTimeRange("18:00:00", "02:00:00")).toBe(true);
+    });
+
+    it("accepts 24-hour libraries", () => {
+      expect(hasValidTimeRange("00:00", "00:00")).toBe(true);
+      expect(hasValidTimeRange("00:00", "23:59")).toBe(true);
+    });
+
+    it("rejects malformed times", () => {
+      expect(hasValidTimeRange("25:00", "06:00")).toBe(false);
+      expect(hasValidTimeRange("6 am", "10 pm")).toBe(false);
     });
 
     it("rejects null opening", () => {

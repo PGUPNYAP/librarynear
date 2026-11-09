@@ -1,3 +1,4 @@
+import { toTelHref, toWhatsAppHref } from "@/lib/phone";
 import { CheckCircle2, Clock3, HelpCircle, XCircle } from "lucide-react";
 import { supabaseServer } from "@/lib/supabase-server";
 import { requireApprovedStaff } from "@/lib/staff-access";
@@ -16,6 +17,9 @@ type OwnerSubmission = {
   status: string;
   created_at: string | null;
   reviewer_notes: string | null;
+  possible_duplicate_of?: string | null;
+  ownership_status?: string | null;
+  library_branches?: { display_name: string; slug: string; city: string } | null;
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -48,14 +52,15 @@ export default async function OwnerSubmissionsAdminPage() {
 
   const { data: submissions, error } = await supabaseServer
     .from("owner_library_submissions")
-    .select("id, display_name, city, locality, phone_number, status, created_at, reviewer_notes")
-    .order("created_at", { ascending: false });
+    .select("id, display_name, city, locality, phone_number, status, created_at, reviewer_notes, possible_duplicate_of, ownership_status, library_branches!owner_library_submissions_possible_duplicate_of_fkey(display_name, slug, city)")
+    .order("created_at", { ascending: false })
+    .limit(500);
 
   if (error) {
     return <div className="p-8 text-red-500">Error loading owner submissions: {error.message}</div>;
   }
 
-  const allSubmissions = (submissions ?? []) as OwnerSubmission[];
+  const allSubmissions = (submissions ?? []) as unknown as OwnerSubmission[];
   const pending = allSubmissions.filter((submission) => submission.status === "pending_review");
 
   return (
@@ -102,12 +107,25 @@ export default async function OwnerSubmissionsAdminPage() {
                     <div className="mt-0.5 text-xs text-muted-foreground">
                       {[submission.locality, submission.city].filter(Boolean).join(", ")}
                     </div>
+                    {submission.library_branches ? (
+                      <a
+                        href={`/${submission.library_branches.city.toLowerCase()}/library/${submission.library_branches.slug}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-1 inline-block rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800 hover:underline"
+                      >
+                        Possible duplicate of {submission.library_branches.display_name}: check ownership
+                      </a>
+                    ) : null}
+                    {submission.ownership_status === "unverified" ? (
+                      <div className="mt-1 text-[11px] text-muted-foreground">Ownership not verified</div>
+                    ) : null}
                   </td>
                   <td className="px-6 py-4 text-muted-foreground">{submission.city}</td>
                   <td className="px-6 py-4 text-muted-foreground">
                     {submission.phone_number ? (
                       <a 
-                        href={`https://wa.me/${submission.phone_number.replace(/\s+/g, "").startsWith("+91") ? submission.phone_number.replace(/\s+/g, "") : "+91" + submission.phone_number.replace(/\s+/g, "")}`}
+                        href={toWhatsAppHref(submission.phone_number) ?? toTelHref(submission.phone_number) ?? undefined}
                         target="_blank"
                         rel="noreferrer"
                         className="hover:underline hover:text-primary"

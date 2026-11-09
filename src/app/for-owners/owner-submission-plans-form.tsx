@@ -44,6 +44,11 @@ export function OwnerSubmissionPlansForm({
             storageKey={`owner-submission-plans:${submissionId}`}
             note="Need to update address, phone, timings, or anything else? Please contact us and our team will help."
           />
+          <p className="text-xs text-muted-foreground">Plan changes go live on your public page right away.</p>
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <input type="checkbox" name="confirm_remove_all_plans" />
+            I want to remove all plans (only needed if you deleted every plan above)
+          </label>
           <FormSubmitButton className="rounded-full bg-primary px-6 text-white hover:bg-primary/90">
             Save updated plans
           </FormSubmitButton>

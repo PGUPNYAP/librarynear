@@ -1,55 +1,41 @@
-import metroStationsData from "@/data/delhi-metro-stations.json";
+import stationsData from "@/data/metro-stations-india.json";
 
-type MetroStation = {
-  station_name: string;
-  line_name: string;
-  latitude: number;
-  longitude: number;
-};
+/**
+ * Nearest metro / light-rail station from coordinates, for any city.
+ * Stations: Delhi's curated list + OpenStreetMap stations for other cities
+ * (regenerate with `npx tsx scripts/fetch-places.ts` then `scripts/clean-data.ts`).
+ * Returns null when no station is within MAX_METRO_KM, so a library is never
+ * labelled with a station in another city.
+ */
+const MAX_METRO_KM = 2.5;
 
-const metroStations = (metroStationsData as Partial<MetroStation>[])
-  .filter(
-    (item): item is MetroStation =>
-      typeof item.station_name === "string" &&
-      typeof item.line_name === "string" &&
-      typeof item.latitude === "number" &&
-      typeof item.longitude === "number",
-  );
+type Station = [string, number, number, string];
+const stations = stationsData as Station[];
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
-  const radiusKm = 6371.0088;
-  const lat1Rad = (lat1 * Math.PI) / 180;
-  const lng1Rad = (lng1 * Math.PI) / 180;
-  const lat2Rad = (lat2 * Math.PI) / 180;
-  const lng2Rad = (lng2 * Math.PI) / 180;
-  const dLat = lat2Rad - lat1Rad;
-  const dLng = lng2Rad - lng1Rad;
-  const hav =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1Rad) * Math.cos(lat2Rad) * Math.sin(dLng / 2) ** 2;
-
-  return 2 * radiusKm * Math.asin(Math.sqrt(hav));
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 6371.0088 * 2 * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
 export async function findNearestMetro(latitude: number, longitude: number) {
-  if (!metroStations.length) return null;
-
-  let bestStation: MetroStation | null = null;
-  let bestDistance = Number.POSITIVE_INFINITY;
-
-  for (const station of metroStations) {
-    const distance = haversineKm(latitude, longitude, station.latitude, station.longitude);
-    if (distance < bestDistance) {
-      bestStation = station;
-      bestDistance = distance;
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  let best: Station | null = null;
+  let bestKm = Infinity;
+  for (const station of stations) {
+    if (Math.abs(station[1] - latitude) > 0.05 || Math.abs(station[2] - longitude) > 0.05) continue;
+    const km = haversineKm(latitude, longitude, station[1], station[2]);
+    if (km < bestKm) {
+      best = station;
+      bestKm = km;
     }
   }
-
-  if (!bestStation) return null;
-
+  if (!best || bestKm > MAX_METRO_KM) return null;
   return {
-    nearest_metro: bestStation.station_name,
-    nearest_metro_line: bestStation.line_name || null,
-    nearest_metro_distance_km: Math.round(bestDistance * 100) / 100,
+    nearest_metro: best[0],
+    nearest_metro_line: best[3] || null,
+    nearest_metro_distance_km: Math.round(bestKm * 100) / 100,
   };
 }

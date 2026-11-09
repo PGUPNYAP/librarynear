@@ -1,9 +1,11 @@
+import { toTelHref, toWhatsAppHref } from "@/lib/phone";
 import Link from "next/link";
 import { Search } from "lucide-react";
 import { EditLibraryModal } from "./edit-modal";
 import { VerificationStatusSelect } from "./verification-status-select";
 import { getLibraryOpsPage } from "@/lib/library-ops";
 import { requireApprovedStaff } from "@/lib/staff-access";
+import { getActiveCities } from "@/lib/cities-server";
 
 function buildPageHref(page: number, q?: string, city?: string, sort?: string, verified?: string) {
   const params = new URLSearchParams();
@@ -38,6 +40,7 @@ export default async function AdminLibrariesPage({
   }
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const cities = await getActiveCities();
 
   return (
     <div className="p-8">
@@ -69,9 +72,11 @@ export default async function AdminLibrariesPage({
             className="w-full sm:w-36 py-2 px-3 border border-border rounded-lg text-sm bg-white focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
           >
             <option value="">All Cities</option>
-            <option value="Delhi">Delhi</option>
-            <option value="Noida">Noida</option>
-            <option value="Jaipur">Jaipur</option>
+            {cities.map((option) => (
+              <option key={option.slug} value={option.name}>
+                {option.name}
+              </option>
+            ))}
           </select>
 
           <select
@@ -132,7 +137,7 @@ export default async function AdminLibrariesPage({
                     <td className="px-6 py-4 text-muted-foreground">
                       {lib.phone_number ? (
                         <a 
-                          href={`https://wa.me/${lib.phone_number.replace(/\s+/g, "").startsWith("+91") ? lib.phone_number.replace(/\s+/g, "") : "+91" + lib.phone_number.replace(/\s+/g, "")}`}
+                          href={toWhatsAppHref(lib.phone_number) ?? toTelHref(lib.phone_number) ?? undefined}
                           target="_blank"
                           rel="noreferrer"
                           className="hover:underline hover:text-primary"

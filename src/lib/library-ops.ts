@@ -46,6 +46,8 @@ export async function getLibraryOpsPage({
     };
   }
 
+  // Filtering, sorting and paging all happen in the database. Loading
+  // everything and slicing in JS silently stopped at PostgREST's 1000-row cap.
   let query = supabaseServer
     .from("library_branches")
     .select("*, library_fee_plans(*), library_images(*)", { count: "exact" })
@@ -53,7 +55,9 @@ export async function getLibraryOpsPage({
 
   if (q) {
     const safeQ = sanitizeSearchTerm(q);
-    query = query.or(`display_name.ilike.%${safeQ}%,locality.ilike.%${safeQ}%,phone_number.ilike.%${safeQ}%`);
+    if (safeQ) {
+      query = query.or(`display_name.ilike.%${safeQ}%,locality.ilike.%${safeQ}%,phone_number.ilike.%${safeQ}%,slug.ilike.%${safeQ}%`);
+    }
   }
 
   if (city) {
@@ -71,8 +75,23 @@ export async function getLibraryOpsPage({
   if (verified === "verified") {
     query = query.eq("verification_status", "verified");
   } else if (verified === "unverified") {
-    query = query.neq("verification_status", "verified");
+    query = query.or("verification_status.is.null,verification_status.neq.verified");
   }
+
+  switch (sort) {
+    case "score_asc":
+      query = query.order("profile_completeness_score", { ascending: true, nullsFirst: true });
+      break;
+    case "name_asc":
+      query = query.order("display_name", { ascending: true });
+      break;
+    case "recent":
+      query = query.order("updated_at", { ascending: false, nullsFirst: false });
+      break;
+    default:
+      query = query.order("profile_completeness_score", { ascending: false, nullsFirst: false });
+  }
+  query = query.order("id", { ascending: true }).range(from, to);
 
   const { data, count, error } = await query;
 
@@ -81,32 +100,9 @@ export async function getLibraryOpsPage({
     profile_completeness_score: calculateLibraryProfileCompleteness(library),
   }));
 
-  const sortedLibraries = [...libraries];
-  if (sort === "score_asc") {
-    sortedLibraries.sort(
-      (a, b) =>
-        (a.profile_completeness_score ?? 0) - (b.profile_completeness_score ?? 0) ||
-        a.display_name.localeCompare(b.display_name),
-    );
-  } else if (sort === "name_asc") {
-    sortedLibraries.sort((a, b) => a.display_name.localeCompare(b.display_name));
-  } else if (sort === "recent") {
-    sortedLibraries.sort(
-      (a, b) => new Date(b.updated_at ?? 0).getTime() - new Date(a.updated_at ?? 0).getTime(),
-    );
-  } else {
-    sortedLibraries.sort(
-      (a, b) =>
-        (b.profile_completeness_score ?? 0) - (a.profile_completeness_score ?? 0) ||
-        a.display_name.localeCompare(b.display_name),
-    );
-  }
-
-  const paginatedLibraries = sortedLibraries.slice(from, to + 1);
-
   return {
-    libraries: paginatedLibraries,
-    totalCount: count ?? sortedLibraries.length,
+    libraries,
+    totalCount: count ?? libraries.length,
     pageSize,
     error,
   };

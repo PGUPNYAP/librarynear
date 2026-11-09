@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 import Link from "next/link";
 import { unstable_cache } from "next/cache";
 import { MapPin, Clock, ShieldCheck, ExternalLink, Navigation } from "lucide-react";
@@ -18,6 +18,17 @@ import { LibraryDetailActions } from "@/components/library-detail-actions";
 import { LibraryPhotoGallery } from "@/components/library-photo-gallery";
 import { getSiteUrl } from "@/lib/site-url";
 import { LibraryReviews } from "@/components/library-reviews";
+import { citySlug, libraryTitleParts, toPlaceSlug } from "@/lib/places";
+import { type LibraryCardData, runLibraryCardQuery, withCardImage } from "@/lib/library-card-data";
+import {
+  buildAnswerSummary,
+  buildLibraryFaqs,
+  buildOpeningHoursSpecification,
+  faqPageSchema,
+  formatPriceRange,
+  formatTimingLabel,
+  getPriceRange,
+} from "@/lib/library-seo";
 
 type LibraryBranch = Tables<"library_branches">;
 type FeePlan = Tables<"library_fee_plans">;
@@ -108,20 +119,14 @@ interface PageProps {
   params: Promise<{ city: string; slug: string }>;
 }
 
-// Pre-render all library pages at build time
+// Library pages are rendered on first request and cached (ISR). Pre-rendering
+// all ~12k pages at build time is slow and costs build minutes for no benefit.
 export async function generateStaticParams() {
-  if (process.env.NODE_ENV === "development") {
-    return [];
-  }
-
-  const { data } = await supabaseServer
-    .from("library_branches")
-    .select("city, slug");
-  const rows = (data as Array<Pick<LibraryBranch, "city" | "slug">>) ?? [];
-  return rows.map((b) => ({ city: b.city.toLowerCase(), slug: b.slug }));
+  return [];
 }
 
-export const revalidate = 300;
+// Edits call revalidatePath() for the page, so a long window is safe and cheap.
+export const revalidate = 3600;
 
 function formatTimeLabel(value: string | null | undefined) {
   if (!value) return null;
@@ -267,7 +272,7 @@ const getCachedLibraryDetailData = unstable_cache(
   async (slug: string) => getLibraryDetailData(slug),
   ["library-detail-data"],
   {
-    revalidate: 300,
+    revalidate: 3600,
     tags: ["library-detail", "library-cards"],
   },
 );
@@ -278,17 +283,20 @@ const getLibraryDetailForRoute =
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { city, slug } = await params;
   const lib = await getLibraryDetailForRoute(slug);
-  if (!lib) return { title: "Library Not Found" };
+  if (!lib) return { title: "Library not found", robots: { index: false, follow: true } };
   const feePlans = lib.library_fee_plans ?? [];
   const amenities = parseAmenities(lib.amenities_text);
 
   const siteUrl = getSiteUrl();
-  const pageUrl = `${siteUrl}/${city}/library/${slug}`;
+  // Canonical always uses the library's real city, whatever city is in the URL.
+  const pageUrl = `${siteUrl}/${citySlug(lib.city)}/library/${slug}`;
+  void city;
   const previewImage =
     (lib.library_images?.[0]?.imagekit_url
       ? getOptimizedImageUrl(lib.library_images[0].imagekit_url, "detailHero")
       : null) || `${siteUrl}/logo-icon.webp`;
-  const previewTitle = `${lib.display_name}${lib.locality ? `, ${lib.locality}` : ""} | LibraryNear`;
+  // The root layout template appends " | LibraryNear"; never add it here too.
+  const previewTitle = libraryTitleParts(lib.display_name, lib.locality, lib.city).join(", ");
   const previewDescription = buildMetadataDescription(lib, feePlans);
   const keywords = [
     lib.display_name,
@@ -304,13 +312,14 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
     title: previewTitle,
     description: previewDescription,
     keywords,
+    robots: { index: true, follow: true, "max-image-preview": "large", "max-snippet": -1 },
     alternates: {
       canonical: pageUrl,
     },
     openGraph: {
       type: "website",
       url: pageUrl,
-      title: previewTitle,
+      title: `${previewTitle} | LibraryNear`,
       description: previewDescription,
       siteName: "LibraryNear",
       images: [
@@ -324,7 +333,7 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
     },
     twitter: {
       card: "summary_large_image",
-      title: previewTitle,
+      title: `${previewTitle} | LibraryNear`,
       description: previewDescription,
       images: [previewImage],
     },
@@ -340,6 +349,56 @@ function parseAmenities(amenitiesText: string | null): string[] {
     .slice(0, 12);
 }
 
+type NearbyLibrary = LibraryCardData & { coverImageUrl: string | null };
+
+async function getNearbyLibraries(city: string, locality: string | null, excludeId: string) {
+  if (!locality) return [] as NearbyLibrary[];
+  const rows = await runLibraryCardQuery((selectClause) =>
+    supabaseServer
+      .from("library_branches")
+      .select(selectClause)
+      .eq("is_active", true)
+      .eq("city", city)
+      .eq("locality", locality)
+      .neq("id", excludeId)
+      .order("profile_completeness_score", { ascending: false })
+      .limit(6),
+  );
+  return rows.map(withCardImage) as NearbyLibrary[];
+}
+
+const getCachedNearbyLibraries = unstable_cache(getNearbyLibraries, ["library-detail-nearby-v1"], {
+  revalidate: 3600,
+  tags: ["library-cards"],
+});
+
+type PublishedReview = {
+  id: string;
+  rating: number;
+  review_text: string;
+  created_at: string;
+  reviewer_name: string | null;
+  reviewer_photo_url: string | null;
+  source: string | null;
+  profiles: { full_name: string | null; avatar_url: string | null } | null;
+};
+
+async function getPublishedReviews(libraryId: string): Promise<PublishedReview[]> {
+  const { data } = await supabaseServer
+    .from("library_reviews")
+    .select("id, rating, review_text, created_at, reviewer_name, reviewer_photo_url, source, profiles(full_name, avatar_url)")
+    .eq("library_branch_id", libraryId)
+    .eq("status", "published")
+    .order("created_at", { ascending: false })
+    .limit(50);
+  return (data || []) as unknown as PublishedReview[];
+}
+
+const getCachedPublishedReviews = unstable_cache(getPublishedReviews, ["library-detail-reviews-v1"], {
+  revalidate: 3600,
+  tags: ["library-detail", "library-reviews"],
+});
+
 export default async function LibraryDetailPage({ params }: PageProps) {
   const { city, slug } = await params;
 
@@ -348,16 +407,23 @@ export default async function LibraryDetailPage({ params }: PageProps) {
     () => getLibraryDetailForRoute(slug),
   );
   const lib = libraryMeasurement.result;
+  // Runs before anything is streamed, so Google receives a real 404.
   if (!lib) notFound();
 
+  // One URL per library: send /any-city/library/x to the library's real city.
+  const canonicalCity = citySlug(lib.city);
+  if (city !== canonicalCity) {
+    permanentRedirect(`/${canonicalCity}/library/${slug}`);
+  }
+
   const feePlans = lib.library_fee_plans ?? [];
-  const { data: reviewsData } = await supabaseServer
-    .from("library_reviews")
-    .select("id, rating, review_text, created_at, reviewer_name, reviewer_photo_url, profiles(full_name, avatar_url)")
-    .eq("library_branch_id", lib.id)
-    .eq("status", "published")
-    .order("created_at", { ascending: false });
-  const reviews = (reviewsData || []) as any[];
+  const isDev = process.env.NODE_ENV === "development";
+  const [reviews, nearbyLibraries] = await Promise.all([
+    isDev ? getPublishedReviews(lib.id) : getCachedPublishedReviews(lib.id),
+    isDev
+      ? getNearbyLibraries(lib.city, lib.locality, lib.id)
+      : getCachedNearbyLibraries(lib.city, lib.locality, lib.id),
+  ]);
 
   const images = (lib.library_images ?? [])
     .map((image, index) =>
@@ -374,15 +440,37 @@ export default async function LibraryDetailPage({ params }: PageProps) {
     `slug="${slug}" city="${city}" images=${images.length} feePlans=${feePlans.length}`,
   );
 
+  const seoInput = {
+    ...lib,
+    amenities,
+    feePlans,
+  };
+  const answerSummary = buildAnswerSummary(seoInput);
+  const faqs = buildLibraryFaqs(seoInput);
+  const timingLabel = formatTimingLabel(lib);
+  const priceRangeLabel = formatPriceRange(feePlans);
+  const priceRange = getPriceRange(feePlans);
+
   const walkingMins = lib.nearest_metro_distance_km
     ? Math.round(lib.nearest_metro_distance_km * 12)
     : null;
   const siteUrl = getSiteUrl();
-  const pageUrl = `${siteUrl}/${city}/library/${slug}`;
+  const cityName = lib.city;
+  const pageUrl = `${siteUrl}/${canonicalCity}/library/${slug}`;
+  const localitySlug = toPlaceSlug(lib.locality);
+  const openingHoursSpecification = buildOpeningHoursSpecification(lib);
+
+  // Only first-party reviews written on LibraryNear go into structured data.
+  // Imported third-party (Google) reviews are not marked up, per Google's
+  // review snippet guidelines, and anonymous reviews are skipped.
+  const markupReviews = reviews.filter(
+    (review) => review.source !== "google" && Boolean(review.profiles?.full_name),
+  );
+
   const librarySchema = {
     "@context": "https://schema.org",
-    "@type": "LocalBusiness",
-    "@id": pageUrl,
+    "@type": "Library",
+    "@id": `${pageUrl}#library`,
     name: lib.display_name,
     url: pageUrl,
     description: lib.description || fallbackDescription,
@@ -390,14 +478,14 @@ export default async function LibraryDetailPage({ params }: PageProps) {
     address: {
       "@type": "PostalAddress",
       streetAddress: lib.full_address ?? lib.formatted_address,
-      addressLocality: lib.locality ?? lib.district,
-      addressRegion: lib.state ?? "Delhi",
+      addressLocality: lib.locality ?? lib.district ?? cityName,
+      addressRegion: lib.state ?? undefined,
       postalCode: lib.pin_code,
       addressCountry: "IN",
     },
     areaServed: {
       "@type": "City",
-      name: lib.city,
+      name: cityName,
     },
     ...(lib.latitude && lib.longitude
       ? {
@@ -406,20 +494,35 @@ export default async function LibraryDetailPage({ params }: PageProps) {
             latitude: lib.latitude,
             longitude: lib.longitude,
           },
+          hasMap: `https://www.google.com/maps/search/?api=1&query=${lib.latitude},${lib.longitude}`,
         }
       : {}),
     ...(lib.phone_number ? { telephone: lib.phone_number } : {}),
-    ...(lib.opening_time && lib.closing_time
+    ...(openingHoursSpecification ? { openingHoursSpecification } : {}),
+    ...(priceRange
       ? {
-          openingHours: `Mo-Su ${lib.opening_time}-${lib.closing_time}`,
+          priceRange:
+            priceRange.min === priceRange.max
+              ? `₹${priceRange.min}`
+              : `₹${priceRange.min}-₹${priceRange.max}`,
         }
       : {}),
+    ...(amenities.length
+      ? {
+          amenityFeature: amenities.map((amenity) => ({
+            "@type": "LocationFeatureSpecification",
+            name: amenity,
+            value: true,
+          })),
+        }
+      : {}),
+    ...(lib.total_seats ? { maximumAttendeeCapacity: lib.total_seats } : {}),
     ...(feePlans.length
       ? {
           makesOffer: feePlans.slice(0, 8).map((plan) => ({
             "@type": "Offer",
             priceCurrency: plan.currency || "INR",
-            price: plan.price,
+            price: plan.discounted_price ?? plan.price,
             name: plan.plan_name,
             description: plan.description || plan.duration_label || undefined,
             availability: "https://schema.org/InStock",
@@ -433,88 +536,79 @@ export default async function LibraryDetailPage({ params }: PageProps) {
             ratingValue: lib.aggregate_rating,
             reviewCount: lib.review_count,
             bestRating: 5,
-            worstRating: 1
-          }
+            worstRating: 1,
+          },
         }
       : {}),
-    ...(reviews.length
+    ...(markupReviews.length
       ? {
-          review: reviews.map(r => ({
+          review: markupReviews.slice(0, 10).map((r) => ({
             "@type": "Review",
-            author: { "@type": "Person", name: r.profiles?.full_name || "Anonymous Student" },
-            datePublished: r.created_at.split("T")[0],
+            author: { "@type": "Person", name: r.profiles?.full_name },
+            datePublished: r.created_at?.split("T")[0],
             reviewRating: { "@type": "Rating", ratingValue: r.rating, bestRating: 5 },
-            reviewBody: r.review_text
-          }))
+            reviewBody: r.review_text,
+          })),
         }
       : {}),
   };
+  const breadcrumbItems = [
+    { name: "Home", item: siteUrl },
+    { name: cityName, item: `${siteUrl}/${canonicalCity}` },
+    ...(lib.locality
+      ? [{ name: lib.locality, item: `${siteUrl}/${canonicalCity}/locality/${localitySlug}` }]
+      : []),
+    { name: lib.display_name, item: pageUrl },
+  ];
   const breadcrumbSchema = {
     "@context": "https://schema.org",
     "@type": "BreadcrumbList",
-    itemListElement: [
-      {
-        "@type": "ListItem",
-        position: 1,
-        name: "Home",
-        item: siteUrl,
-      },
-      {
-        "@type": "ListItem",
-        position: 2,
-        name: city.charAt(0).toUpperCase() + city.slice(1),
-        item: `${siteUrl}/${city}`,
-      },
-      {
-        "@type": "ListItem",
-        position: 3,
-        name: lib.display_name,
-        item: pageUrl,
-      },
-    ],
+    itemListElement: breadcrumbItems.map((entry, index) => ({
+      "@type": "ListItem",
+      position: index + 1,
+      name: entry.name,
+      item: entry.item,
+    })),
   };
-  const faqSchema = {
+  const webPageSchema = {
     "@context": "https://schema.org",
-    "@type": "FAQPage",
-    mainEntity: [
-      {
-        "@type": "Question",
-        name: `Where is ${lib.display_name} located?`,
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: lib.full_address ?? lib.formatted_address ?? `${lib.locality ?? lib.city}, ${lib.city}`,
-        },
-      },
-      {
-        "@type": "Question",
-        name: `How can I compare ${lib.display_name} with other libraries nearby?`,
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: `Compare metro distance, timings, amenities, study environment, seat availability, and fees before choosing ${lib.display_name}.`,
-        },
-      },
-    ],
+    "@type": "WebPage",
+    "@id": pageUrl,
+    url: pageUrl,
+    name: libraryTitleParts(lib.display_name, lib.locality, cityName).join(", "),
+    about: { "@id": `${pageUrl}#library` },
+    isPartOf: { "@id": `${siteUrl}/#website` },
+    publisher: { "@id": `${siteUrl}/#organization` },
+    speakable: { "@type": "SpeakableSpecification", cssSelector: ["#library-summary"] },
   };
-  const jsonLd = [librarySchema, breadcrumbSchema, faqSchema];
+  const jsonLd = [librarySchema, breadcrumbSchema, webPageSchema, faqPageSchema(faqs)];
 
   return (
     <div className="flex flex-col min-h-screen bg-white">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd).replace(/</g, "\\u003c") }}
       />
 
       {/* BREADCRUMB + TITLE */}
       <div className="container mx-auto px-6 md:px-10 py-6 border-b border-border/50">
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div>
-            <div className="flex gap-2 items-center text-sm text-muted-foreground mb-2">
+            <nav aria-label="Breadcrumb" className="flex flex-wrap gap-2 items-center text-sm text-muted-foreground mb-2">
               <Link href="/" className="hover:underline">Home</Link>
               <span>/</span>
-              <Link href={`/${city}`} className="hover:underline capitalize">{city}</Link>
+              <Link href={`/${canonicalCity}`} className="hover:underline">{cityName}</Link>
+              {lib.locality ? (
+                <>
+                  <span>/</span>
+                  <Link href={`/${canonicalCity}/locality/${localitySlug}`} className="hover:underline">
+                    {lib.locality}
+                  </Link>
+                </>
+              ) : null}
               <span>/</span>
               <span className="text-black font-medium">{lib.display_name}</span>
-            </div>
+            </nav>
             <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-black">{lib.display_name}</h1>
             <div className="flex flex-wrap items-center gap-3 mt-2">
               {lib.verification_status === "verified" && (
@@ -528,10 +622,10 @@ export default async function LibraryDetailPage({ params }: PageProps) {
                   {lib.nearest_metro}{walkingMins ? ` · ${walkingMins} min walk` : ""}
                 </div>
               )}
-              {lib.opening_time && lib.closing_time && (
+              {timingLabel && (
                 <div className="flex items-center text-sm text-muted-foreground">
                   <Clock className="w-3.5 h-3.5 mr-1" />
-                  {lib.opening_time} – {lib.closing_time}
+                  {timingLabel}
                 </div>
               )}
             </div>
@@ -552,11 +646,39 @@ export default async function LibraryDetailPage({ params }: PageProps) {
         {/* LEFT COLUMN */}
         <div className="lg:col-span-2 space-y-10">
 
+          {/* Answer-first summary: the sentence answer engines quote. */}
+          <section aria-labelledby="library-summary-heading" className="rounded-2xl border border-primary/15 bg-primary/[0.03] p-5">
+            <h2 id="library-summary-heading" className="sr-only">Quick facts</h2>
+            <p id="library-summary" className="text-[15px] leading-7 text-black">{answerSummary}</p>
+            <dl className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+              <div>
+                <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Fees</dt>
+                <dd className="mt-0.5 font-semibold text-black">{priceRangeLabel ?? "Ask library"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Hours</dt>
+                <dd className="mt-0.5 font-semibold text-black">{timingLabel ?? "Ask library"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Nearest metro</dt>
+                <dd className="mt-0.5 font-semibold text-black">{lib.nearest_metro ?? "—"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Rating</dt>
+                <dd className="mt-0.5 font-semibold text-black">
+                  {lib.aggregate_rating && lib.review_count
+                    ? `${lib.aggregate_rating.toFixed(1)} ★ (${lib.review_count})`
+                    : "No reviews yet"}
+                </dd>
+              </div>
+            </dl>
+          </section>
+
           <LibraryPhotoGallery images={images} libraryName={lib.display_name} />
 
           {/* About */}
           <section>
-            <h2 className="text-xl font-bold mb-4">About</h2>
+            <h2 className="text-xl font-bold mb-4">About {lib.display_name}</h2>
             {lib.description ? (
               <p className="text-muted-foreground leading-relaxed mb-6 whitespace-pre-wrap">
                 {lib.description}
@@ -589,7 +711,6 @@ export default async function LibraryDetailPage({ params }: PageProps) {
 
           <AmenitiesGrid amenities={amenities} />
 
-
           {/* Location */}
           <section>
             <h2 className="text-xl font-bold mb-4">Location</h2>
@@ -613,7 +734,7 @@ export default async function LibraryDetailPage({ params }: PageProps) {
                   <div>
                     <p className="text-sm font-medium">{lib.full_address ?? lib.formatted_address}</p>
                     {lib.locality && (
-                      <p className="text-sm text-muted-foreground mt-0.5">{lib.locality}, {lib.city}</p>
+                      <p className="text-sm text-muted-foreground mt-0.5">{lib.locality}, {cityName}</p>
                     )}
                   </div>
                   {lib.map_link && (
@@ -628,13 +749,84 @@ export default async function LibraryDetailPage({ params }: PageProps) {
             </Card>
           </section>
 
+          {/* How to compare */}
+          <section className="rounded-3xl border border-border/70 p-6">
+            <h2 className="text-xl font-bold text-black">Before you choose {lib.display_name}</h2>
+            <ul className="mt-4 list-disc space-y-2 pl-5 text-sm leading-7 text-muted-foreground">
+              {comparisonTips.map((tip) => (
+                <li key={tip}>{tip}</li>
+              ))}
+            </ul>
+          </section>
+
           {/* Student Reviews */}
-          <LibraryReviews 
-            libraryBranchId={lib.id} 
-            reviews={reviews} 
-            aggregateRating={lib.aggregate_rating || 0} 
-            reviewCount={lib.review_count || 0} 
+          <LibraryReviews
+            libraryBranchId={lib.id}
+            reviews={reviews}
+            aggregateRating={lib.aggregate_rating || 0}
+            reviewCount={lib.review_count || 0}
           />
+
+          {/* FAQ (mirrors the FAQPage markup) */}
+          <section aria-labelledby="library-faq-heading">
+            <h2 id="library-faq-heading" className="text-xl font-bold text-black mb-4">
+              Frequently asked questions about {lib.display_name}
+            </h2>
+            <div className="divide-y divide-border rounded-2xl border border-border">
+              {faqs.map((faq, index) => (
+                <details key={faq.question} className="group p-5" open={index < 2}>
+                  <summary className="cursor-pointer list-none font-semibold text-black">
+                    {faq.question}
+                  </summary>
+                  <p className="mt-2 text-sm leading-7 text-muted-foreground">{faq.answer}</p>
+                </details>
+              ))}
+            </div>
+          </section>
+
+          {/* Nearby alternatives */}
+          {nearbyLibraries.length > 0 ? (
+            <section aria-labelledby="nearby-heading">
+              <div className="mb-4 flex items-end justify-between gap-4">
+                <h2 id="nearby-heading" className="text-xl font-bold text-black">
+                  Other libraries in {lib.locality}
+                </h2>
+                <Link
+                  href={`/${canonicalCity}/locality/${localitySlug}`}
+                  className="text-sm font-semibold text-primary hover:underline"
+                >
+                  See all in {lib.locality}
+                </Link>
+              </div>
+              <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {nearbyLibraries.map((other) => (
+                  <li key={other.id} className="flex items-center justify-between gap-3 rounded-xl border border-border p-4">
+                    <div className="min-w-0">
+                      <Link
+                        href={`/${canonicalCity}/library/${other.slug}`}
+                        className="block truncate font-semibold text-black hover:text-primary"
+                      >
+                        {other.display_name}
+                      </Link>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {other.nearest_metro ? `Near ${other.nearest_metro}` : other.locality}
+                        {other.aggregate_rating && other.review_count
+                          ? ` · ${other.aggregate_rating.toFixed(1)} ★`
+                          : ""}
+                      </p>
+                    </div>
+                    <Link
+                      href={`/compare?ids=${lib.id},${other.id}`}
+                      rel="nofollow"
+                      className="shrink-0 rounded-full border border-border px-3 py-1 text-xs font-semibold text-black hover:border-primary hover:text-primary"
+                    >
+                      Compare
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
         </div>
 
         {/* SIDEBAR */}
@@ -645,7 +837,7 @@ export default async function LibraryDetailPage({ params }: PageProps) {
               <EnquiryForm
                 libraryBranchId={lib.id}
                 phoneNumber={lib.phone_number}
-                sourcePage={`/${city}/library/${slug}`}
+                sourcePage={`/${canonicalCity}/library/${slug}`}
               />
             </CardContent>
           </Card>

@@ -7,7 +7,7 @@ import { BookOpen } from "lucide-react";
 export const revalidate = 86400; // 24 hours caching
 
 export const metadata: Metadata = {
-  title: "Directory | LibraryNear",
+  title: "Directory",
   description: "Browse all cities and localities available on LibraryNear. Find the perfect study library near you.",
   alternates: {
     canonical: `${getSiteUrl()}/directory`,

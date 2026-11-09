@@ -1,5 +1,6 @@
 import Image from "next/image";
 import type { Metadata } from "next";
+import { slugToIlikePattern, slugToLabel } from "@/lib/places";
 import { unstable_cache } from "next/cache";
 import { MapPin } from "lucide-react";
 import { supabaseServer } from "@/lib/supabase-server";
@@ -7,6 +8,11 @@ import { type LibraryCardData, runLibraryCardQuery, withCardImage } from "@/lib/
 import { getSiteUrl } from "@/lib/site-url";
 import { DeferredSaveButton } from "@/components/deferred-save-button";
 import { IntentLink } from "@/components/intent-link";
+import { Suspense } from "react";
+import { HomeSearchShell } from "@/components/home-search-shell";
+import { CityIcon } from "@/components/city-icon";
+import { resolveCityParam } from "@/lib/cities-server";
+import { getCityLocalities } from "@/lib/library-search";
 
 interface PageProps {
   params: Promise<{ city: string }>;
@@ -21,40 +27,22 @@ async function getCityOverview(city: string): Promise<{
       supabaseServer
         .from("library_branches")
         .select(selectClause)
-        .ilike("city", city)
+        .ilike("city", slugToIlikePattern(city))
         .eq("is_active", true)
         .order("profile_completeness_score", { ascending: false })
         .limit(12),
     ),
-    supabaseServer
-      .from("library_branches")
-      .select("locality")
-      .ilike("city", city)
-      .eq("is_active", true)
-      .not("locality", "is", null),
+    resolveCityParam(city).then((resolved) => (resolved ? getCityLocalities(resolved.name) : [])),
   ]);
 
-  const counts: Record<string, number> = {};
-  for (const row of localityRows.data ?? []) {
-    const locality = row.locality?.trim();
-    if (locality) {
-      counts[locality] = (counts[locality] ?? 0) + 1;
-    }
-  }
-
-  const localities = Object.entries(counts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 18)
-    .map(([name]) => name);
-
-  return { libraries, localities };
+  return { libraries, localities: localityRows.slice(0, 24).map((row) => row.name) };
 }
 
 const getCachedCityOverview = unstable_cache(
   async (city: string) => getCityOverview(city),
   ["city-overview"],
   {
-    revalidate: 300,
+    revalidate: 3600,
     tags: ["library-cards", "city-overview"],
   },
 );
@@ -62,28 +50,22 @@ const getCachedCityOverview = unstable_cache(
 const getCityOverviewForRoute =
   process.env.NODE_ENV === "development" ? getCityOverview : getCachedCityOverview;
 
+// Rendered on first request, then cached (ISR).
 export async function generateStaticParams() {
-  if (process.env.NODE_ENV === "development") {
-    return [];
-  }
-
-  const { data } = await supabaseServer
-    .from("library_branches")
-    .select("city")
-    .eq("is_active", true);
-
-  const cities = [...new Set((data ?? []).map((row) => row.city?.toLowerCase()).filter(Boolean))];
-  return cities.map((city) => ({ city }));
+  return [];
 }
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { city } = await params;
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}`;
 
+  const resolved = await resolveCityParam(city);
+  const count = resolved?.libraryCount ?? 0;
   return {
-    title: `Best Libraries in ${cityLabel}`,
+    robots: { index: count >= 3, follow: true },
+    title: `Best Libraries in ${resolved?.name ?? cityLabel} (${count.toLocaleString("en-IN")} listed)`,
     description: `Find the best study libraries in ${cityLabel}. Explore top localities, compare amenities and fees, and discover verified library listings near you.`,
     alternates: {
       canonical: pageUrl,
@@ -98,7 +80,7 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   };
 }
 
-export const revalidate = 300;
+export const revalidate = 3600;
 
 function toLocalitySlug(locality: string) {
   return locality.toLowerCase().replace(/\s+/g, "-");
@@ -106,7 +88,8 @@ function toLocalitySlug(locality: string) {
 
 export default async function CityPage({ params }: PageProps) {
   const { city } = await params;
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const resolvedCity = await resolveCityParam(city);
+  const cityLabel = resolvedCity?.name ?? slugToLabel(city);
   const { libraries, localities } = await getCityOverviewForRoute(city);
   const cards = libraries.map(withCardImage);
   const siteUrl = getSiteUrl();
@@ -175,22 +158,44 @@ export default async function CityPage({ params }: PageProps) {
     <div className="flex min-h-screen flex-col bg-white">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(citySchema) }}
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(citySchema).replace(/</g, "\\u003c") }}
       />
+      <Suspense fallback={null}>
+        <HomeSearchShell />
+      </Suspense>
+
+      {/* Locality ribbon, same as the homepage */}
+      <div className="w-full border-b border-border/50 bg-white shadow-sm">
+        <div className="container mx-auto flex items-center gap-2 overflow-x-auto px-4 py-2 no-scrollbar md:gap-3 md:px-10 md:py-3">
+          <IntentLink
+            href={`/${city}`}
+            className="flex shrink-0 items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-[12px] font-semibold text-white shadow-sm shadow-primary/20 transition-colors md:px-4 md:py-2 md:text-[13px]"
+          >
+            <CityIcon slug={city} className="h-4 w-4" />
+            All {cityLabel}
+          </IntentLink>
+          {localities.map((locality) => (
+            <IntentLink
+              key={locality}
+              href={`/${city}/locality/${toLocalitySlug(locality)}`}
+              className="shrink-0 rounded-full border border-primary/30 px-3 py-1.5 text-[12px] font-medium text-muted-foreground transition-colors hover:border-primary hover:text-primary md:px-4 md:py-2 md:text-[13px]"
+            >
+              {locality}
+            </IntentLink>
+          ))}
+        </div>
+      </div>
+
       <section className="border-b border-border/50 bg-white">
-        <div className="container mx-auto px-6 py-12 md:px-10 md:py-16">
-          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-primary">
-            Study Spaces in {cityLabel}
-          </p>
-          <h1 className="mt-4 max-w-3xl text-4xl font-bold tracking-tight text-black md:text-5xl">
+        <div className="container mx-auto px-5 py-8 sm:px-6 md:px-10 md:py-16">
+          <h1 className="max-w-3xl text-[28px] font-bold leading-tight tracking-tight text-black sm:text-4xl md:text-5xl">
             Find the best libraries in {cityLabel}
           </h1>
-          <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground md:text-lg">
-            Explore top localities, compare verified libraries, and discover study spaces by metro,
-            amenities, and location.
+          <p className="mt-3 max-w-2xl text-[15px] leading-6 text-muted-foreground md:mt-4 md:text-lg md:leading-7">
+            Filter by locality, fees, amenities and opening hours, then compare your shortlist side by side.
           </p>
 
-          <div className="mt-8 flex flex-wrap gap-3">
+          <div className="mt-6 flex flex-wrap gap-3 md:mt-8">
             <IntentLink
               href={`/${city}/libraries`}
               className="rounded-full bg-primary px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-primary/90"
@@ -207,29 +212,10 @@ export default async function CityPage({ params }: PageProps) {
         </div>
       </section>
 
-      {localities.length > 0 ? (
-        <section className="border-b border-border/40 bg-slate-50/40">
-          <div className="container mx-auto px-6 py-8 md:px-10">
-            <h2 className="text-xl font-bold text-black">Top localities in {cityLabel}</h2>
-            <div className="mt-5 flex flex-wrap gap-3">
-              {localities.map((locality) => (
-                <IntentLink
-                  key={locality}
-                  href={`/${city}/locality/${toLocalitySlug(locality)}`}
-                  className="rounded-full border border-primary/25 bg-white px-4 py-2 text-sm font-medium text-black transition-colors hover:border-primary hover:text-primary"
-                >
-                  {locality}
-                </IntentLink>
-              ))}
-            </div>
-          </div>
-        </section>
-      ) : null}
-
-      <section className="container mx-auto min-h-screen px-6 py-10 pb-20 md:px-10">
-        <div className="mb-6 flex items-center justify-between gap-4">
-          <h2 className="text-2xl font-bold text-black">Featured libraries in {cityLabel}</h2>
-          <IntentLink href={`/${city}/libraries`} className="text-sm font-semibold text-primary hover:underline">
+      <section className="container mx-auto min-h-screen px-5 py-8 pb-20 sm:px-6 md:px-10 md:py-10">
+        <div className="mb-6 flex items-end justify-between gap-4">
+          <h2 className="text-xl font-bold text-black md:text-2xl">Featured libraries in {cityLabel}</h2>
+          <IntentLink href={`/${city}/libraries`} className="shrink-0 whitespace-nowrap text-sm font-semibold text-primary hover:underline">
             See all
           </IntentLink>
         </div>

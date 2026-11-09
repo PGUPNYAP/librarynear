@@ -1,14 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { deleteImageKitFile, getImageKitFileDetails, uploadImageKitFile } from "@/lib/server/imagekit";
-import { checkRateLimit, getClientIp, RATE_LIMITS } from "@/lib/rate-limit";
+import { getClientIp, rateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import { supabaseServer } from "@/lib/supabase-server";
 
 const MAX_OWNER_PHOTO_BYTES = 5 * 1024 * 1024;
 
 export async function POST(request: NextRequest) {
   const ip = getClientIp(request.headers);
-  const rateCheck = checkRateLimit(ip, RATE_LIMITS.ownerImageUpload);
-  if (!rateCheck.success) {
+  const [rateCheck, dailyCheck] = await Promise.all([
+    rateLimit(ip, RATE_LIMITS.ownerImageUpload),
+    rateLimit(ip, RATE_LIMITS.ownerImageUploadDaily),
+  ]);
+  if (!rateCheck.success || !dailyCheck.success) {
     return NextResponse.json(
       { error: "Too many requests" },
       { status: 429, headers: { "Retry-After": String(Math.ceil((rateCheck.resetAt - Date.now()) / 1000)) } },
@@ -45,8 +49,17 @@ export async function POST(request: NextRequest) {
       folder: `/owner-submissions/${user.id}/`,
     });
 
+    // Track the upload so it can be deleted if the form is never submitted.
+    await supabaseServer
+      .from("pending_uploads" as never)
+      .upsert({ file_id: uploaded.fileId, url: uploaded.url, user_id: user.id } as never);
+
     return NextResponse.json(uploaded);
   } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/allowed|under \d+ MB|No image/i.test(message)) {
+      return NextResponse.json({ error: message }, { status: 400 });
+    }
     console.error("Failed to upload owner submission image:", error);
     return NextResponse.json({ error: "Upload failed" }, { status: 500 });
   }
@@ -75,6 +88,7 @@ export async function DELETE(request: NextRequest) {
     }
 
     await deleteImageKitFile(fileId);
+    await supabaseServer.from("pending_uploads" as never).delete().eq("file_id" as never, fileId as never);
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("Failed to delete owner submission image:", error);

@@ -17,6 +17,35 @@ function getBootstrapAdminEmails() {
     .filter(Boolean);
 }
 
+/** Turn a pending staff invite for this email into a staff_users row. */
+async function claimStaffInvite(userId: string, email: string): Promise<StaffUser | null> {
+  const { data: invite } = await supabaseServer
+    .from("staff_invites" as never)
+    .select("email, role, is_approved, invited_by")
+    .eq("email" as never, email.toLowerCase() as never)
+    .maybeSingle();
+  const pending = invite as { role: string; is_approved: boolean; invited_by: string | null } | null;
+  if (!pending) return null;
+
+  const { data: created, error } = await supabaseServer
+    .from("staff_users")
+    .upsert({
+      user_id: userId,
+      role: pending.role,
+      is_approved: pending.is_approved,
+      approved_by: pending.is_approved ? pending.invited_by : null,
+      approved_at: pending.is_approved ? new Date().toISOString() : null,
+    })
+    .select("*")
+    .maybeSingle();
+  if (error) {
+    console.error("Failed to claim staff invite:", error.message);
+    return null;
+  }
+  await supabaseServer.from("staff_invites" as never).delete().eq("email" as never, email.toLowerCase() as never);
+  return (created as StaffUser | null) ?? null;
+}
+
 export async function getCurrentStaffContext() {
   const { user, profile } = await getCurrentViewer();
 
@@ -41,6 +70,11 @@ export async function getCurrentStaffContext() {
       .eq("is_approved", true),
   ]);
 
+  let resolvedStaffUser = staffUser as StaffUser | null;
+  if (!resolvedStaffUser && user.email) {
+    resolvedStaffUser = await claimStaffInvite(user.id, user.email);
+  }
+
   const bootstrapAdmin = (approvedAdminCount ?? 0) === 0;
   const userEmail = user.email?.toLowerCase() ?? "";
   const bootstrapAdminAllowed =
@@ -50,7 +84,7 @@ export async function getCurrentStaffContext() {
 
   return {
     user,
-    staffUser: (staffUser as StaffUser | null) ?? null,
+    staffUser: resolvedStaffUser ?? null,
     profile: (profile as Profile | null) ?? null,
     bootstrapAdmin,
     bootstrapAdminAllowed,
@@ -84,39 +118,55 @@ export async function requireApprovedStaff(allowedRoles: StaffRole[]) {
 }
 
 /**
- * Ensure the current staff user is allowed to mutate a specific library.
- * Admins may touch any library; sales users are restricted to libraries whose
- * locality_id is in their sales_locality_assignments. Prevents IDOR where a
- * sales account calls a server action with an arbitrary library UUID.
+ * Returns the staff context when the current user may change this library,
+ * otherwise null. Admins may touch any library; sales users only libraries
+ * whose locality is in their sales_locality_assignments (prevents IDOR via a
+ * server action called with an arbitrary library id).
  */
-export async function requireLibraryMutationAccess(libraryId: string) {
-  const staff = await requireApprovedStaff(["admin", "sales"]);
+export async function getLibraryMutationAccess(libraryId: string) {
+  const context = await getCurrentStaffContext();
+  if (!context.user) return null;
 
-  if (staff.effectiveRole === "admin") {
-    return staff;
-  }
+  const isBootstrapAdmin = context.bootstrapAdminAllowed;
+  const role = isBootstrapAdmin ? "admin" : (context.staffUser?.role as StaffRole | undefined);
+  const approved = isBootstrapAdmin || Boolean(context.staffUser?.is_approved);
+  if (!approved || (role !== "admin" && role !== "sales")) return null;
+
+  const staff = { ...context, effectiveRole: role, isApproved: true as const };
+  if (role === "admin") return staff;
 
   const { data: library } = await supabaseServer
     .from("library_branches")
     .select("locality_id")
     .eq("id", libraryId)
     .maybeSingle();
-
   const localityId = (library as { locality_id: string | null } | null)?.locality_id ?? null;
-  if (!localityId) {
-    redirect("/sales/libraries");
-  }
+  if (!localityId) return null;
 
   const { data: assignment } = await supabaseServer
     .from("sales_locality_assignments")
     .select("id")
-    .eq("user_id", staff.user!.id)
+    .eq("user_id", context.user.id)
     .eq("locality_id", localityId)
     .maybeSingle();
 
-  if (!assignment) {
-    redirect("/sales/libraries");
-  }
+  return assignment ? staff : null;
+}
 
+/** Redirecting variant for pages and form actions. */
+export async function requireLibraryMutationAccess(libraryId: string) {
+  const staff = await getLibraryMutationAccess(libraryId);
+  if (!staff) {
+    redirect("/sales/libraries?error=" + encodeURIComponent("You are not assigned to this library's locality."));
+  }
   return staff;
+}
+
+/** Ids of localities assigned to a sales user. */
+export async function getAssignedLocalityIds(userId: string) {
+  const { data } = await supabaseServer
+    .from("sales_locality_assignments")
+    .select("locality_id")
+    .eq("user_id", userId);
+  return (data ?? []).map((row) => row.locality_id).filter((id): id is string => Boolean(id));
 }

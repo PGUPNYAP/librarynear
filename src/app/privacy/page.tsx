@@ -66,8 +66,7 @@ export default function PrivacyPage() {
       <section className="border-b border-border/60 bg-white">
         <div className="container mx-auto px-6 py-14 md:px-10 md:py-18">
           <div className="max-w-3xl">
-            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-primary">Privacy</p>
-            <h1 className="mt-3 text-4xl font-bold tracking-tight text-black md:text-5xl">
+            <h1 className="text-4xl font-bold tracking-tight text-black md:text-5xl">
               Privacy Policy
             </h1>
             <p className="mt-4 text-sm text-muted-foreground md:text-base">

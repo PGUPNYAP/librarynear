@@ -1,119 +1,169 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { FormSubmitButton } from "@/components/form-submit-button";
+import { listAssignableLocalities } from "../actions";
 
-type AssignmentOption = {
-  id: string;
+type Locality = {
+  locality_id: string;
   city: string;
-  locality: string;
+  name: string;
+  library_count: number;
+  unverified_count: number;
+  assignee_count: number;
 };
 
 type AssignmentFormProps = {
   userId: string;
-  options: AssignmentOption[];
+  cities: string[];
   existingAssignmentLocalityIds: string[];
   action: (formData: FormData) => void;
 };
 
-export function AssignmentForm({
-  userId,
-  options,
-  existingAssignmentLocalityIds,
-  action,
-}: AssignmentFormProps) {
-  const groupedByCity = useMemo(() => {
-    const next = new Map<string, AssignmentOption[]>();
+/** Pick a city, then tick any number of localities and assign them in one go. */
+export function AssignmentForm({ userId, cities, existingAssignmentLocalityIds, action }: AssignmentFormProps) {
+  const [city, setCity] = useState(cities[0] ?? "");
+  const [localities, setLocalities] = useState<Locality[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+  const [onlyUnassigned, setOnlyUnassigned] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [loading, startLoading] = useTransition();
+  const existing = useMemo(() => new Set(existingAssignmentLocalityIds), [existingAssignmentLocalityIds]);
 
-    for (const option of options) {
-      const city = option.city.trim();
-      const locality = option.locality.trim();
-      if (!city || !locality) continue;
+  useEffect(() => {
+    if (!city) return;
+    let active = true;
+    startLoading(async () => {
+      const result = await listAssignableLocalities(city);
+      if (!active) return;
+      setLocalities(result.localities);
+      setError(result.ok ? null : result.error);
+      setSelected(new Set());
+    });
+    return () => {
+      active = false;
+    };
+  }, [city]);
 
-      const current = next.get(city) ?? [];
-      current.push({ id: option.id, city, locality });
-      next.set(city, current);
-    }
+  const visible = useMemo(() => {
+    const query = filter.trim().toLowerCase();
+    return localities.filter(
+      (locality) =>
+        !existing.has(locality.locality_id) &&
+        (!onlyUnassigned || Number(locality.assignee_count) === 0) &&
+        (!query || locality.name.toLowerCase().includes(query)),
+    );
+  }, [localities, existing, onlyUnassigned, filter]);
 
-    for (const list of next.values()) {
-      list.sort((a, b) => a.locality.localeCompare(b.locality));
-    }
+  const toggle = (id: string) =>
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
-    return Array.from(next.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [options]);
-
-  const [selectedCity, setSelectedCity] = useState(groupedByCity[0]?.[0] ?? "");
-
-  const localityOptions = useMemo(
-    () => groupedByCity.find(([city]) => city === selectedCity)?.[1] ?? [],
-    [groupedByCity, selectedCity],
-  );
-
-  const [selectedLocalityId, setSelectedLocalityId] = useState(
-    localityOptions[0]?.id ?? "",
-  );
-
-  const isAlreadyAssigned = useMemo(
-    () => existingAssignmentLocalityIds.includes(selectedLocalityId),
-    [existingAssignmentLocalityIds, selectedLocalityId],
-  );
+  const selectedLibraries = localities
+    .filter((locality) => selected.has(locality.locality_id))
+    .reduce((sum, locality) => sum + Number(locality.library_count), 0);
 
   return (
-    <form action={action} className="mb-4 space-y-3">
+    <form action={action} className="mb-6 space-y-3">
       <input type="hidden" name="user_id" value={userId} />
-      <input type="hidden" name="locality_id" value={selectedLocalityId} />
+      <input type="hidden" name="return_to" value={`/admin/team/${userId}`} />
+      {[...selected].map((id) => (
+        <input key={id} type="hidden" name="locality_id" value={id} />
+      ))}
+
       <div className="flex flex-wrap items-center gap-3">
         <select
-          value={selectedCity}
-          onChange={(event) => {
-            const nextCity = event.target.value;
-            setSelectedCity(nextCity);
-            const nextLocalities = groupedByCity.find(([city]) => city === nextCity)?.[1] ?? [];
-            setSelectedLocalityId(nextLocalities[0]?.id ?? "");
-          }}
-          className="min-w-[220px] rounded-md border border-border bg-white px-3 py-2 text-sm"
-          required
+          value={city}
+          onChange={(event) => setCity(event.target.value)}
+          className="min-w-[180px] rounded-md border border-border bg-white px-3 py-2 text-sm"
+          aria-label="City"
         >
-          {groupedByCity.length === 0 ? <option value="">No cities available</option> : null}
-          {groupedByCity.map(([city]) => (
-            <option key={city} value={city}>
-              {city}
+          {cities.map((option) => (
+            <option key={option} value={option}>
+              {option}
             </option>
           ))}
         </select>
-
-        <select
-          value={selectedLocalityId}
-          onChange={(event) => setSelectedLocalityId(event.target.value)}
-          className="min-w-[260px] rounded-md border border-border bg-white px-3 py-2 text-sm"
-          required
-          disabled={!selectedCity || localityOptions.length === 0}
-        >
-          {localityOptions.length === 0 ? <option value="">No localities available</option> : null}
-          {localityOptions.map((option) => (
-            <option key={option.id} value={option.id}>
-              {option.locality}
-            </option>
-          ))}
-        </select>
-
-        <FormSubmitButton
-          className="bg-primary px-4 py-2 text-sm font-medium text-white"
-          pendingLabel="Assigning..."
-        >
-          Assign
-        </FormSubmitButton>
+        <input
+          value={filter}
+          onChange={(event) => setFilter(event.target.value)}
+          placeholder="Filter localities"
+          aria-label="Filter localities"
+          className="min-w-[180px] flex-1 rounded-md border border-border px-3 py-2 text-sm"
+        />
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+          <input type="checkbox" checked={onlyUnassigned} onChange={(event) => setOnlyUnassigned(event.target.checked)} />
+          Only unassigned
+        </label>
       </div>
 
-      <p className="text-xs text-muted-foreground">
-        Multiple users can be assigned to the same locality. Localities come from the canonical list, so typos and casing differences are no longer possible.
-      </p>
+      <div className="max-h-72 overflow-y-auto rounded-lg border border-border">
+        {loading ? (
+          <p className="p-4 text-sm text-muted-foreground">Loading localities…</p>
+        ) : error ? (
+          <p className="p-4 text-sm text-rose-600">{error}</p>
+        ) : visible.length === 0 ? (
+          <p className="p-4 text-sm text-muted-foreground">No localities to show.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-muted/80 text-xs text-muted-foreground">
+              <tr>
+                <th className="w-10 px-3 py-2 text-left">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all visible"
+                    checked={visible.length > 0 && visible.every((locality) => selected.has(locality.locality_id))}
+                    onChange={(event) =>
+                      setSelected(event.target.checked ? new Set(visible.map((locality) => locality.locality_id)) : new Set())
+                    }
+                  />
+                </th>
+                <th className="px-3 py-2 text-left">Locality</th>
+                <th className="px-3 py-2 text-right">Libraries</th>
+                <th className="px-3 py-2 text-right">Unverified</th>
+                <th className="px-3 py-2 text-right">Assignees</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {visible.map((locality) => (
+                <tr key={locality.locality_id} className="hover:bg-muted/40">
+                  <td className="px-3 py-2">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${locality.name}`}
+                      checked={selected.has(locality.locality_id)}
+                      onChange={() => toggle(locality.locality_id)}
+                    />
+                  </td>
+                  <td className="px-3 py-2 text-black">{locality.name}</td>
+                  <td className="px-3 py-2 text-right">{locality.library_count}</td>
+                  <td className="px-3 py-2 text-right">{locality.unverified_count}</td>
+                  <td className="px-3 py-2 text-right">{locality.assignee_count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
 
-      {isAlreadyAssigned ? (
-        <p className="text-xs text-amber-700">
-          This staff member already has the selected locality assigned.
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs text-muted-foreground">
+          {selected.size
+            ? `${selected.size} localities selected · ${selectedLibraries} libraries`
+            : "Tick localities to assign. Several people can share a locality."}
         </p>
-      ) : null}
+        <FormSubmitButton
+          className="bg-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          pendingLabel="Assigning..."
+        >
+          Assign {selected.size || ""}
+        </FormSubmitButton>
+      </div>
     </form>
   );
 }

@@ -9,6 +9,7 @@ import { getSiteUrl } from "@/lib/site-url";
 import { DeferredSaveButton } from "@/components/deferred-save-button";
 import { IntentLink } from "@/components/intent-link";
 import type { Metadata } from "next";
+import { slugToIlikePattern, slugToLabel } from "@/lib/places";
 
 interface PageProps {
   params: Promise<{ city: string }>;
@@ -20,7 +21,7 @@ async function get24HourLibraries(city: string): Promise<LibraryCardData[]> {
       .from("library_branches")
       .select(selectClause)
       .eq("is_active", true)
-      .ilike("city", city)
+      .ilike("city", slugToIlikePattern(city))
       .in("opening_time", ["00:00:00", "00:00"])
       .order("profile_completeness_score", { ascending: false }),
   );
@@ -30,7 +31,7 @@ const getCached24HourLibraries = unstable_cache(
   async (city: string) => get24HourLibraries(city),
   ["libraries-24-hour"],
   {
-    revalidate: 120,
+    revalidate: 3600,
     tags: ["library-cards"],
   },
 );
@@ -38,11 +39,11 @@ const getCached24HourLibraries = unstable_cache(
 const getCity24HourLibraries =
   process.env.NODE_ENV === "development" ? get24HourLibraries : getCached24HourLibraries;
 
-export const revalidate = 120;
+export const revalidate = 3600;
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { city } = await params;
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/24-hour-libraries`;
   
@@ -74,7 +75,7 @@ export default async function TwentyFourHourLibrariesPage({ params }: PageProps)
   
   logPerf("24-hour", [librariesMeasurement.metric], `city="${city}" count=${libraries.length}`);
 
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/24-hour-libraries`;
   

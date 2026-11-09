@@ -153,7 +153,7 @@ describe("Lead Submission - Edge Cases", () => {
     });
 
     it("handles null/undefined email", () => {
-      const email: string | undefined = undefined;
+      const email = undefined as string | undefined;
       expect(email?.trim() || null).toBeNull();
     });
   });

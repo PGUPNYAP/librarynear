@@ -1,5 +1,8 @@
 import Link from "next/link";
-import { Building2, ClipboardList } from "lucide-react";
+import { Suspense } from "react";
+import { Building2, LogOut, Zap } from "lucide-react";
+import { FlashBanner } from "@/components/flash-banner";
+import { logout } from "@/app/admin/actions";
 
 export default function SalesLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -13,15 +16,24 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
           <nav className="flex items-center gap-4 text-sm font-medium">
             <Link href="/sales/libraries" className="flex items-center gap-2 text-black hover:text-primary">
               <Building2 className="h-4 w-4" />
-              Libraries
+              My libraries
             </Link>
-            <Link href="/admin/team" className="flex items-center gap-2 text-black hover:text-primary">
-              <ClipboardList className="h-4 w-4" />
-              Team
+            <Link href="/sales/quick-fill" className="flex items-center gap-2 text-black hover:text-primary">
+              <Zap className="h-4 w-4" />
+              Quick fill
             </Link>
+            <form action={logout}>
+              <button className="flex items-center gap-2 text-rose-600 hover:underline">
+                <LogOut className="h-4 w-4" />
+                Sign out
+              </button>
+            </form>
           </nav>
         </div>
       </header>
+      <Suspense fallback={null}>
+        <FlashBanner />
+      </Suspense>
       <main>{children}</main>
     </div>
   );

@@ -53,14 +53,14 @@ function parseAmenities(value: string | null) {
 import { getSiteUrl } from "@/lib/site-url";
 
 export const metadata = {
-  title: "List Your Library — For Owners | LibraryNear",
+  title: "List Your Library — For Owners",
   description: "List your study library on LibraryNear and reach nearby students searching for reading rooms in Delhi. Manage your plans and reach more students today.",
   alternates: {
     canonical: `${getSiteUrl()}/for-owners`,
   },
   openGraph: {
     type: "website",
-    title: "List Your Library — For Owners | LibraryNear",
+    title: "List Your Library — For Owners",
     description: "List your study library on LibraryNear and reach nearby students searching for reading rooms in Delhi.",
     siteName: "LibraryNear",
     url: `${getSiteUrl()}/for-owners`,
@@ -91,9 +91,9 @@ function errorMessage(error?: string) {
     case "too_few_images":
       return "Please upload at least 1 photo to continue.";
     case "invalid_image":
-      return "Please upload image files only, up to 5 MB each.";
+      return "Please upload JPG, PNG, WebP or HEIC photos only, up to 5 MB each.";
     case "invalid_phone":
-      return "Please enter a valid Indian mobile number for phone and WhatsApp.";
+      return "Please enter a valid Indian phone number. WhatsApp must be a mobile number.";
     case "invalid_map_link":
       return "Please add a valid Google Maps link.";
     case "unresolvable_map_link":
@@ -103,7 +103,7 @@ function errorMessage(error?: string) {
     case "invalid_pin_code":
       return "Please enter a valid 6-digit PIN code.";
     case "invalid_timings":
-      return "Please make sure the closing time is after the opening time.";
+      return "Please enter valid opening and closing times. Overnight hours (e.g. 6 PM to 2 AM) are fine; tick “Open 24 hours” for 24-hour libraries.";
     case "invalid_plan_description":
       return "Each plan description can have up to 30 words only.";
     case "missing_required_fields":
@@ -297,6 +297,11 @@ export default async function ForOwnersPage({
                   We could not update those plans right now. Please try again.
                 </div>
               ) : null}
+              {plans_error === "empty" ? (
+                <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  No plans were saved, so we kept your current plans. To remove every plan, tick “I want to remove all plans” and save again.
+                </div>
+              ) : null}
 
               <div className="space-y-3">
                 {(submissions as OwnerSubmissionRow[]).map((submission) => (
@@ -400,6 +405,11 @@ export default async function ForOwnersPage({
                   <div className="space-y-2">
                     <label htmlFor="district" className="text-sm font-medium text-black">District</label>
                     <Input id="district" name="district" placeholder={editableSubmission?.district ?? "District"} className="rounded-2xl border-border/80 bg-slate-50/50 shadow-sm focus-visible:ring-primary/30" />
+                    {placeholderOnlyEditMode && editableSubmission?.district ? (
+                      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <input type="checkbox" name="clear_district" /> Remove saved district
+                      </label>
+                    ) : null}
                   </div>
                 </div>
 
@@ -458,6 +468,15 @@ export default async function ForOwnersPage({
                      <Input id="closing_time" name="closing_time" type="time" placeholder={editableSubmission?.closing_time ?? "HH:MM"} className="rounded-2xl border-border/80 bg-slate-50/50 shadow-sm focus-visible:ring-primary/30" required={!placeholderOnlyEditMode} />
                   </div>
                 </div>
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+                  <label className="flex items-center gap-2 font-medium text-black">
+                    <input type="checkbox" name="open_24h" />
+                    Open 24 hours
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    Open past midnight? Enter the closing time as it is (e.g. 6:00 PM to 2:00 AM).
+                  </p>
+                </div>
 
                 <div className="grid gap-4 md:grid-cols-3">
                   <PhoneWhatsappFields
@@ -469,6 +488,11 @@ export default async function ForOwnersPage({
                     phoneRequired={!placeholderOnlyEditMode}
                   />
                 </div>
+                {placeholderOnlyEditMode ? (
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input type="checkbox" name="clear_whatsapp_number" /> Remove the saved WhatsApp number
+                  </label>
+                ) : null}
 
                 <div className="space-y-2">
                   <label htmlFor="amenities" className="text-sm font-medium text-black">Amenities <span className="text-destructive">*</span></label>
@@ -485,8 +509,14 @@ export default async function ForOwnersPage({
                     name="description"
                     rows={4}
                     placeholder={editableSubmission?.description ?? "Tell students what makes your library a great place to study."}
+                    maxLength={2000}
                     className="w-full rounded-2xl border border-border/80 bg-slate-50/50 px-3 py-2 text-sm outline-none transition-colors shadow-sm focus-visible:border-primary/50 focus-visible:ring-3 focus-visible:ring-primary/30"
                   />
+                  {placeholderOnlyEditMode ? (
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <input type="checkbox" name="clear_description" /> Remove the saved description
+                    </label>
+                  ) : null}
                 </div>
 
                 <div className="space-y-2">

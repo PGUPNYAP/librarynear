@@ -59,18 +59,29 @@ function Section({
 function Field({
   label,
   required = false,
+  clearName,
   children,
 }: {
   label: string;
   required?: boolean;
+  /** Renders a "Clear" checkbox named clear_<clearName> that removes the saved value. */
+  clearName?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className="grid min-w-0 gap-2">
-      <label className="block text-sm font-medium text-black">
-        {label}
-        {required ? <span className="text-destructive"> *</span> : null}
-      </label>
+      <div className="flex items-center justify-between gap-2">
+        <label className="block text-sm font-medium text-black">
+          {label}
+          {required ? <span className="text-destructive"> *</span> : null}
+        </label>
+        {clearName ? (
+          <label className="flex items-center gap-1 text-xs text-muted-foreground">
+            <input type="checkbox" name={`clear_${clearName}`} />
+            Clear saved value
+          </label>
+        ) : null}
+      </div>
       {children}
     </div>
   );
@@ -82,6 +93,7 @@ export function EditLibraryModal({ library, allowDelete = false }: EditLibraryMo
   const [isUploading, setIsUploading] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [overrideNearestMetro, setOverrideNearestMetro] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [images, setImages] = useState<LibraryImage[]>(
     library.library_images ? [...library.library_images] : [],
   );
@@ -133,10 +145,12 @@ export function EditLibraryModal({ library, allowDelete = false }: EditLibraryMo
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setIsSaving(true);
+    setSaveError(null);
     const formData = new FormData(e.currentTarget);
-
-    const result = await updateLibraryBranch(library.id, formData);
-
+    const result = await updateLibraryBranch(library.id, formData).catch(() => ({
+      success: false as const,
+      error: "Network error. Your changes were not saved.",
+    }));
     setIsSaving(false);
     if (result.success) {
       window.localStorage.removeItem(`library-edit-draft:${library.id}`);
@@ -145,7 +159,7 @@ export function EditLibraryModal({ library, allowDelete = false }: EditLibraryMo
       window.localStorage.removeItem(`library-edit-phone:${library.id}`);
       setIsOpen(false);
     } else {
-      alert("Failed to update: " + result.error);
+      setSaveError(result.error);
     }
   };
 
@@ -192,6 +206,15 @@ export function EditLibraryModal({ library, allowDelete = false }: EditLibraryMo
               <FormDraftPersistence formId={formId} storageKey={`library-edit-draft:${library.id}`} />
 
               <div className="mx-auto w-full max-w-4xl min-w-0 space-y-6">
+                <p className="text-xs text-muted-foreground">
+                  Empty fields keep their current value (shown in grey). Tick “Clear saved value” to remove one.
+                  Overnight hours (e.g. 18:00 to 02:00) and 24-hour (00:00 to 00:00) are allowed.
+                </p>
+                {saveError ? (
+                  <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+                    {saveError}
+                  </div>
+                ) : null}
                 <Section title="Core details">
                   <div className="grid min-w-0 gap-4">
                       <Field label="Display name" required>
@@ -203,13 +226,13 @@ export function EditLibraryModal({ library, allowDelete = false }: EditLibraryMo
                       <Field label="City" required>
                         <Input name="city" placeholder={library.city || "Enter city"} className="min-w-0 rounded-2xl bg-white" />
                       </Field>
-                      <Field label="District">
+                      <Field label="District" clearName="district">
                         <Input name="district" placeholder={library.district || "Enter district"} className="min-w-0 rounded-2xl bg-white" />
                       </Field>
-                      <Field label="State" required>
+                      <Field label="State">
                         <Input name="state" placeholder={library.state || "Enter state"} className="min-w-0 rounded-2xl bg-white" />
                       </Field>
-                      <Field label="PIN code" required>
+                      <Field label="PIN code">
                         <Input name="pin_code" placeholder={library.pin_code || "Enter PIN code"} className="min-w-0 rounded-2xl bg-white" />
                       </Field>
                   </div>
@@ -217,7 +240,7 @@ export function EditLibraryModal({ library, allowDelete = false }: EditLibraryMo
 
                 <Section title="Location details" description="Coordinates and nearest metro are calculated from the Google Maps link unless you explicitly override them.">
                   <div className="min-w-0 space-y-4">
-                    <Field label="Full address" required>
+                    <Field label="Full address" clearName="full_address">
                       <textarea
                         name="full_address"
                         placeholder={library.full_address || "Enter full address"}
@@ -272,10 +295,10 @@ export function EditLibraryModal({ library, allowDelete = false }: EditLibraryMo
                 <Section title="Facilities and logistics">
                   <div className="min-w-0 space-y-4">
                     <div className="grid min-w-0 gap-4">
-                        <Field label="Opening time" required>
+                        <Field label="Opening time" clearName="opening_time">
                           <Input name="opening_time" type="time" placeholder={library.opening_time || "HH:MM"} className="min-w-0 rounded-2xl bg-white" />
                         </Field>
-                        <Field label="Closing time" required>
+                        <Field label="Closing time" clearName="closing_time">
                           <Input name="closing_time" type="time" placeholder={library.closing_time || "HH:MM"} className="min-w-0 rounded-2xl bg-white" />
                         </Field>
                     </div>
@@ -288,10 +311,20 @@ export function EditLibraryModal({ library, allowDelete = false }: EditLibraryMo
                         usePlaceholdersOnly
                         phoneRequired={false}
                       />
+                      <label className="flex items-center gap-1 text-xs text-muted-foreground">
+                        <input type="checkbox" name="clear_whatsapp_number" />
+                        Clear saved WhatsApp number
+                      </label>
                     </div>
 
                     <div className="grid min-w-0 gap-2">
-                      <label className="block text-sm font-medium text-black">Amenities *</label>
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="block text-sm font-medium text-black">Amenities</label>
+                        <label className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <input type="checkbox" name="clear_amenities" />
+                          Clear all
+                        </label>
+                      </div>
                       <AmenitiesChecklist initialSelected={parseAmenities(library.amenities_text)} />
                     </div>
                   </div>
@@ -299,7 +332,7 @@ export function EditLibraryModal({ library, allowDelete = false }: EditLibraryMo
 
                 <Section title="About and seats">
                   <div className="grid min-w-0 gap-4">
-                    <Field label="Description">
+                    <Field label="Description" clearName="description">
                       <textarea
                         name="description"
                         placeholder={library.description || "Tell students about this library"}
@@ -307,7 +340,7 @@ export function EditLibraryModal({ library, allowDelete = false }: EditLibraryMo
                         className="w-full min-w-0 rounded-2xl border border-border/80 bg-white px-3 py-2 text-sm outline-none transition-colors focus-visible:border-primary/50 focus-visible:ring-3 focus-visible:ring-primary/30"
                       />
                     </Field>
-                    <Field label="Seats" required>
+                    <Field label="Seats" clearName="total_seats">
                       <Input name="total_seats" type="number" min="1" placeholder={library.total_seats ? String(library.total_seats) : "Enter seats"} className="min-w-0 rounded-2xl bg-white" />
                     </Field>
                   </div>

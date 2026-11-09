@@ -9,6 +9,8 @@ import { getSiteUrl } from "@/lib/site-url";
 import { DeferredSaveButton } from "@/components/deferred-save-button";
 import { IntentLink } from "@/components/intent-link";
 import type { Metadata } from "next";
+import { slugToIlikePattern, slugToLabel } from "@/lib/places";
+import { getExamName } from "@/lib/exams";
 
 interface PageProps {
   params: Promise<{ city: string; exam: string; locality: string }>;
@@ -37,7 +39,7 @@ async function getExamLocalityLibraries(city: string, locality: string): Promise
       .from("library_branches")
       .select(selectClause)
       .eq("is_active", true)
-      .ilike("city", city)
+      .ilike("city", slugToIlikePattern(city))
       .ilike("locality", locality)
       .order("aggregate_rating", { ascending: false })
       .order("review_count", { ascending: false })
@@ -49,7 +51,7 @@ const getCachedExamLocalityLibraries = unstable_cache(
   async (city: string, locality: string) => getExamLocalityLibraries(city, locality),
   ["libraries-exam-locality-fallback"],
   {
-    revalidate: 120,
+    revalidate: 3600,
     tags: ["library-cards"],
   },
 );
@@ -57,22 +59,22 @@ const getCachedExamLocalityLibraries = unstable_cache(
 const getLocalExamLibraries =
   process.env.NODE_ENV === "development" ? getExamLocalityLibraries : getCachedExamLocalityLibraries;
 
-export const revalidate = 120;
+export const revalidate = 3600;
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { city, exam, locality: localitySlug } = await params;
   const examName = formatExamName(exam);
   const locality = formatLocalityName(localitySlug);
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/exam/${exam}/locality/${localitySlug}`;
   
   return {
     title: `Best ${examName} Study Libraries in ${locality}, ${cityLabel}`,
     description: `Find the best study libraries and reading rooms for ${examName} preparation in ${locality}. Join a focused peer group to crack your exam.`,
-    alternates: {
-      canonical: pageUrl,
-    },
+    // These pages show the same libraries for every exam, so they stay out of
+    // the index until libraries carry real exam data.
+    robots: { index: false, follow: true },
     openGraph: {
       type: "website",
       url: pageUrl,
@@ -85,6 +87,7 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
 
 export default async function ExamLocalityPage({ params }: PageProps) {
   const { city, exam, locality: localitySlug } = await params;
+  if (!getExamName(exam)) notFound();
   const examName = formatExamName(exam);
   const locality = formatLocalityName(localitySlug);
 
@@ -97,7 +100,7 @@ export default async function ExamLocalityPage({ params }: PageProps) {
   
   logPerf("exam-locality", [librariesMeasurement.metric], `city="${city}" exam="${exam}" locality="${locality}" count=${libraries.length}`);
 
-  const cityLabel = city.charAt(0).toUpperCase() + city.slice(1);
+  const cityLabel = slugToLabel(city);
   const siteUrl = getSiteUrl();
   const pageUrl = `${siteUrl}/${city}/exam/${exam}/locality/${localitySlug}`;
   

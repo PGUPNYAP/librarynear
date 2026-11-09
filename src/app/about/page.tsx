@@ -64,6 +64,31 @@ export default function AboutPage() {
         ))}
       </section>
 
+      <section className="container mx-auto grid gap-6 px-6 pb-12 md:grid-cols-2 md:px-10">
+        <div className="rounded-3xl border border-border bg-white p-8 shadow-sm">
+          <h2 className="text-2xl font-bold text-black">Who runs LibraryNear</h2>
+          <p className="mt-3 text-sm leading-7 text-muted-foreground">
+            LibraryNear is run by a small team based at DTU IIF, AB-4, Shahbad, Rohini, Delhi 110042. Our team checks
+            libraries locality by locality to keep listings accurate.
+          </p>
+          <p className="mt-3 text-sm leading-7 text-muted-foreground">
+            Contact: <a href="mailto:librarynear.com@gmail.com" className="text-primary underline">librarynear.com@gmail.com</a> ·{" "}
+            <a href="tel:+918796190507" className="text-primary underline">+91 87961 90507</a>
+          </p>
+        </div>
+        <div className="rounded-3xl border border-border bg-white p-8 shadow-sm">
+          <h2 className="text-2xl font-bold text-black">How we keep listings honest</h2>
+          <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-7 text-muted-foreground">
+            <li>“Verified” means our team confirmed the library and its contact details.</li>
+            <li>Ratings come only from students who signed in and reviewed on LibraryNear.</li>
+            <li>No library can pay for a better position or to remove reviews.</li>
+          </ul>
+          <Link href="/editorial-policy" className="mt-4 inline-block text-sm font-semibold text-primary hover:underline">
+            Read our editorial and data policy
+          </Link>
+        </div>
+      </section>
+
       <section className="container mx-auto px-6 pb-14 md:px-10">
         <div className="rounded-3xl border border-border bg-white p-8 shadow-sm">
           <h2 className="text-2xl font-bold text-black">Explore or list a library</h2>
@@ -72,7 +97,7 @@ export default function AboutPage() {
           </p>
           <div className="mt-6 flex flex-wrap gap-3">
             <Link
-              href="/delhi/libraries"
+              href="/cities"
               className="inline-flex items-center rounded-full bg-primary px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-primary/90"
             >
               Explore libraries
